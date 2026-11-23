@@ -60,3 +60,24 @@ ordering, size, boot identity and digest shape, but neither supplies recovery
 authority. New launches retain the same persisted shape with null ancestry and
 control-group fields; no global pre-launch process census is required. Valid old
 records with or without those optional proofs use the same ownership policy.
+
+## Catalog recovery evidence
+
+Common envelope version 28 adds the private per-role completion receipts of
+[explicit-model catalog recovery](../recovery/journal.md#explicit-model-catalog-recovery).
+Migration starts with empty receipts and retains terminal workflow states.
+Current release compatibility metadata uses envelope 28, and the derived
+detached token `1:28` rejects mixed runtimes.
+
+Common run-envelope version 28 with version-2 observations adds optional
+rejection evidence on failed attempts. At terminal settlement, Runner derives
+it from that invocation's normalized adapter failure. `writableRejection`
+requires a `workspace-write` checkpoint and the exact `model_unavailable`/
+`turn`/`rejected`/`none`/`terminal` record. Runner adds `writableRetryEligible`
+only for a non-fork request. Reconciliation may use the no-effect record on
+its own, but writable retry and catalog-triggered restatement require the
+eligibility marker. `commitRejection` requires a
+`commit:<step>` checkpoint and the exact `model_unavailable`/`commit`/
+`rejected`/`none`/`terminal`/`not_started` record. Validation rejects any other
+value, status or checkpoint. The evidence stays private and older envelopes
+omit it.

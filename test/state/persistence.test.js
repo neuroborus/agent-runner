@@ -14,6 +14,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { largeFinalizationResult } from "../support/index.js";
+import {
+  recordCompletedModelTurn,
+  recordReadOnlyCatalogMiss,
+} from "../support/model-catalog.js";
+import { createRunStore as createRegistryRunStore } from "../../src/pipeline-registry.js";
 import { bootstrapReady } from "../../pipelines/plan-execution/test/support/index.js";
 import { normalizeBootstrapResult } from "../../pipelines/plan-execution/src/workflow-contract.js";
 import {
@@ -687,8 +692,303 @@ test("pins one bounded provider policy receipt per role", async (t) => {
   );
 });
 
+test("explicit-model completion receipts require the exact retired role and survive journal replay", async (t) => {
+  const { projectPath, taskPath, stateRoot, store } = await createFixture(t);
+  const preferences = { profile: "profile", model: "model", effort: "high" };
+  const input = runInput(projectPath, taskPath);
+  input.roles.worker = { ...input.roles.worker, ...preferences };
+  const { state, lease, directoryPath } = await store.createRun(input);
+  try {
+    const turn = { role: "worker", phase: "clarify" };
+    const startTurn = () =>
+      store.startAgentTurn(lease, turn, {
+        activity: {
+          actor: turn.role,
+          phase: turn.phase,
+          kind: "turn-started",
+          message: "Worker turn started.",
+        },
+      });
+    await startTurn();
+    await store.recordChildSession(lease, {
+      role: "worker",
+      sessionId: "acknowledged-child",
+      contextKey: "a".repeat(64),
+    });
+    assert.deepEqual(
+      (await store.loadRun(state.runId)).modelCompletionReceipts,
+      {},
+    );
+    const beforeDispatch = await store.loadRun(state.runId);
+    const startAttempt = () =>
+      store.startObservationAttempt(lease, {
+        role: turn.role,
+        checkpoint: "clarify:read-only:0",
+      });
+    const recordReceipt = () =>
+      store.recordModelCompletion(lease, turn.role, preferences);
+    await assert.rejects(recordReceipt(), { code: "ERR_INVALID_AGENT_TURN" });
+    const started = await startAttempt();
+    const { id, role, checkpoint } = started.observations.attempts.at(-1);
+    const failed = await store.recordObservationBatch(
+      lease,
+      { id, role, checkpoint },
+      [],
+      { status: "failed" },
+    );
+    await assert.rejects(recordReceipt(), { code: "ERR_INVALID_AGENT_TURN" });
+    const completeAttempt = async () => {
+      const current = await startAttempt();
+      await store.recordObservationBatch(
+        lease,
+        { id: current.revision, role, checkpoint },
+        [],
+        { status: "completed" },
+      );
+    };
+    await completeAttempt();
+    await store.finishAgentTurn(lease, turn);
+    const newerTurn = await startTurn();
+    await assert.rejects(recordReceipt(), { code: "ERR_INVALID_AGENT_TURN" });
+    await completeAttempt();
+    for (const field of Object.keys(preferences)) {
+      await assert.rejects(
+        store.recordModelCompletion(lease, "worker", {
+          ...preferences,
+          [field]: "mismatch",
+        }),
+        { code: "ERR_INVALID_AGENT_TURN" },
+      );
+    }
+    const completed = await store.recordModelCompletion(
+      lease,
+      "worker",
+      preferences,
+    );
+    assert.match(completed.modelCompletionReceipts.worker, /^[a-f0-9]{64}$/u);
+    assert.equal(
+      (await store.recordModelCompletion(lease, "worker", preferences))
+        .revision,
+      completed.revision,
+    );
+    await store.finishAgentTurn(lease, turn);
+    const cold = createRunStore({ stateRoot });
+    assert.deepEqual(
+      (await cold.loadRun(state.runId)).modelCompletionReceipts,
+      completed.modelCompletionReceipts,
+    );
+    const eventsPath = join(directoryPath, "events.jsonl");
+    const original = await readFile(eventsPath, "utf8");
+    const events = original
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const event = events.find(
+      ({ revision }) => revision === completed.revision,
+    );
+    try {
+      for (const snapshot of [beforeDispatch, started, failed, newerTurn]) {
+        await writeFile(
+          eventsPath,
+          [
+            ...events.slice(0, snapshot.revision),
+            {
+              ...event,
+              revision: snapshot.revision + 1,
+              recordedAt: snapshot.updatedAt,
+              state: {
+                ...snapshot,
+                revision: snapshot.revision + 1,
+                modelCompletionReceipts: completed.modelCompletionReceipts,
+              },
+            },
+          ]
+            .map((item) => JSON.stringify(item))
+            .join("\n") + "\n",
+        );
+        await assert.rejects(
+          createRunStore({ stateRoot }).loadRun(state.runId),
+          {
+            code: "ERR_INVALID_EVENT_LOG",
+            message: "Run recovery history is inconsistent.",
+          },
+        );
+      }
+      event.state.modelCompletionReceipts.worker = "0".repeat(64);
+      await writeFile(
+        eventsPath,
+        events.map((item) => JSON.stringify(item)).join("\n") + "\n",
+      );
+      await assert.rejects(createRunStore({ stateRoot }).loadRun(state.runId), {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
+    } finally {
+      await writeFile(eventsPath, original);
+    }
+  } finally {
+    await lease.release();
+  }
+});
+
+test("a catalog migration resume cannot silently move to a different phase", async (t) => {
+  const { projectPath, taskPath, stateRoot } = await createFixture(t);
+  const store = createRegistryRunStore({ stateRoot });
+  const { state, lease, directoryPath } = await store.createRun({
+    pipelineId: "polishing",
+    pipelineStateVersion: 25,
+    projectPath,
+    taskPath,
+    roles: { arbiter: { backend: "codex", model: "model" } },
+    pipelineState: {
+      workflowState: "FINALIZE",
+      validationMigrationPending: true,
+      validationMigrationDisagreement: {
+        description: "Different checks.",
+        evidence: ["The reports disagree."],
+      },
+    },
+  });
+  try {
+    const turn = { role: "arbiter", phase: "finalize" };
+    const activity = {
+      actor: "arbiter",
+      phase: "finalize",
+      kind: "turn-started",
+      message: "Started arbitration.",
+    };
+    await store.startAgentTurn(lease, turn, { activity });
+    await recordCompletedModelTurn(store, lease, turn, { model: "model" });
+    const checkpoint = "finalize:read-only:validation-migration";
+    await recordReadOnlyCatalogMiss(store, lease, turn, {
+      activity,
+      checkpoint,
+    });
+    const paused = await store.transitionRun(lease, {
+      activeTurn: null,
+      pause: {
+        reason: "backend_unavailable",
+        code: "ERR_MODEL_CATALOG_RETRY",
+        role: "arbiter",
+        checkpoint,
+        resumeState: "FINALIZE",
+      },
+      pipelineState: {
+        ...state.pipelineState,
+        workflowState: "WAITING_FOR_USER",
+      },
+    });
+    const resume = (workflowState) =>
+      store.transitionRun(lease, {
+        pause: null,
+        pipelineState: { ...paused.pipelineState, workflowState },
+      });
+    await assert.rejects(resume("REVIEW"), {
+      code: "ERR_MODEL_CATALOG_CHECKPOINT_CHANGED",
+    });
+    await assert.rejects(
+      store.transitionRun(lease, {
+        pause: null,
+        pipelineState: {
+          ...paused.pipelineState,
+          workflowState: "FINALIZE",
+          validationMigrationDisagreement: null,
+        },
+      }),
+      { code: "ERR_MODEL_CATALOG_CHECKPOINT_CHANGED" },
+    );
+    const accepted = await resume("FINALIZE");
+    const cold = createRegistryRunStore({ stateRoot });
+    assert.deepEqual((await cold.loadRun(state.runId)).modelCatalogResume, {
+      role: "arbiter",
+      checkpoint,
+      resumeState: "FINALIZE",
+    });
+
+    const eventsPath = join(directoryPath, "events.jsonl");
+    const original = await readFile(eventsPath, "utf8");
+    const events = original.trimEnd().split("\n").map(JSON.parse);
+    const event = events.at(-1);
+    assert.equal(event.revision, accepted.revision);
+    event.state.pipelineState.workflowState = "REVIEW";
+    event.state.modelCatalogResume = null;
+    try {
+      await writeFile(
+        eventsPath,
+        events.map((item) => JSON.stringify(item)).join("\n") + "\n",
+      );
+      await assert.rejects(
+        createRegistryRunStore({ stateRoot }).loadRun(state.runId),
+        {
+          code: "ERR_INVALID_EVENT_LOG",
+        },
+      );
+    } finally {
+      await writeFile(eventsPath, original);
+    }
+  } finally {
+    await lease.release();
+  }
+});
+
+test("watchdog expiry must match the current invocation's provider checkpoint", async (t) => {
+  const { created, store, stateRoot } = await createFixture(t);
+  const { state, lease, directoryPath } = created;
+  const turn = { role: "worker", phase: "writable-result" };
+  await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: turn.role,
+      phase: turn.phase,
+      kind: "turn-started",
+      message: "Started read-only restatement.",
+    },
+  });
+  const checkpoint = "writable-result:read-only:commit:1";
+  await store.startObservationAttempt(lease, { role: turn.role, checkpoint });
+  const expiry = {
+    role: turn.role,
+    checkpoint,
+    attempt: 1,
+    status: "expired",
+    configurationFingerprint: state.providerInactivityFingerprint,
+    contentFingerprint: "a".repeat(64),
+  };
+  const originalCheckpoint = "implement:workspace-write:commit:1";
+  await assert.rejects(
+    store.recordInactivity(
+      lease,
+      { ...expiry, checkpoint: originalCheckpoint },
+      "expired",
+    ),
+    { code: "ERR_INVALID_EVENT_LOG" },
+  );
+  const recorded = await store.recordInactivity(lease, expiry, "expired");
+  assert.equal(
+    (await createRunStore({ stateRoot }).loadRun(state.runId))
+      .inactivityRecovery.checkpoint,
+    checkpoint,
+  );
+
+  const eventsPath = join(directoryPath, "events.jsonl");
+  const original = await readFile(eventsPath, "utf8");
+  const events = original.trimEnd().split("\n").map(JSON.parse);
+  const event = events.at(-1);
+  assert.equal(event.revision, recorded.revision);
+  event.state.inactivityRecovery.checkpoint = originalCheckpoint;
+  try {
+    await writeFile(
+      eventsPath,
+      events.map((item) => JSON.stringify(item)).join("\n") + "\n",
+    );
+    await assert.rejects(createRunStore({ stateRoot }).loadRun(state.runId), {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  } finally {
+    await writeFile(eventsPath, original);
+  }
+});
+
 test("migrates legacy provider policy state before a receipt is recorded", async (t) => {
-  for (const schemaVersion of [12, 13]) {
+  for (const schemaVersion of [12, 13, 27]) {
     const { created, store } = await createFixture(t);
     await created.lease.release();
     const statePath = join(created.directoryPath, "state.json");
@@ -696,6 +996,7 @@ test("migrates legacy provider policy state before a receipt is recorded", async
     const legacy = JSON.parse(await readFile(statePath, "utf8"));
     legacy.schemaVersion = schemaVersion;
     legacy.runtimeCompatibility.runStateVersion = schemaVersion;
+    delete legacy.modelCompletionReceipts;
     if (schemaVersion === 12) delete legacy.providerPolicies;
     const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
     event.schemaVersion = schemaVersion;
@@ -704,6 +1005,7 @@ test("migrates legacy provider policy state before a receipt is recorded", async
     await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
 
     const loaded = await store.loadRun(legacy.runId);
+    assert.deepEqual(loaded.modelCompletionReceipts, {});
     assert.deepEqual(loaded.providerPolicies, {
       reviewer: null,
       worker: null,
@@ -726,6 +1028,7 @@ test("migrates legacy provider policy state before a receipt is recorded", async
         },
       );
       assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+      assert.deepEqual(migrated.modelCompletionReceipts, {});
       assert.deepEqual(migrated.providerPolicies, loaded.providerPolicies);
     } finally {
       await lease.release();

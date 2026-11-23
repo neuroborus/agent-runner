@@ -5,6 +5,50 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-23
+
+- **Exercised Codex model misses pause at the frozen checkpoint.** The Runner
+  requires a journaled role completion and a complete catalog miss with no
+  invocation effect. It preserves writable reservations and existing
+  read-only restatement attempts across resume. COMMIT can renew only after
+  durable pre-executor proof and verification of the unchanged candidate and
+  Git controls. Source forks, older catalog pauses and invalid model selections
+  grant no replay.
+- **Validation-migration arbitration survives catalog retries.** Plan execution
+  saves validation-migration disagreements before arbitration so a model
+  catalog retry can reconstruct the Arbiter's request and preserve its consumed
+  correction allowance without repeating Worker reconciliation.
+- **Clean-confirmation retries keep inspected infrastructure.** Both coding
+  pipelines retain the inspected validation infrastructure on candidate
+  clean-confirmation catalog retries so ignored-file drift cannot advance an
+  unchanged Git candidate.
+- **COMMIT catalog proof binds the failed attempt.** The proof binds to the
+  latest failed Worker attempt of the consumed COMMIT turn and the normalized
+  rejection the Runner recorded on that attempt, so a generic failure, a later
+  independent claim or an earlier completion receipt cannot renew authorization.
+- **Writable `FINALIZE` retries keep frozen inputs.** Both coding pipelines keep
+  the frozen input hashes, candidate, inventory, correction scope and fix
+  accounting from the first pause through dispatch. A writable retry also
+  requires the exact no-effect rejection recorded on the failed attempt.
+- **`CHECK_AND_FIX` retries keep spent rounds.** Catalog retries preserve frozen
+  inputs, candidate scope and spent fix rounds starting at the first pause.
+- **Read-only gate pauses require attempt proof.** Candidate review, clean
+  confirmation and terminal confirmation catalog pauses in both coding pipelines
+  retire only the same gate phase's failed attempt with its recorded no-effect
+  rejection and keep the frozen inputs and reservation, so a prior completion
+  receipt cannot open a retry.
+- **Read-only restatement retries require attempt proof.** A catalog retry for a
+  consumed read-only restatement requires the exact failed attempt's no-effect
+  rejection. Both coding pipelines preserve the reconciled candidate, frozen
+  inputs and spent allowances from pause publication through dispatch.
+- **Recovery stays bound to the recorded invocation.** Both coding pipelines
+  record the inspected infrastructure on initial and correction candidate-review
+  catalog pauses and verify it before dispatch and through settlement.
+  Atomic backoff retires only the recorded read-only restatement
+  when its consumed reservation, provider checkpoint, and reconciled candidate
+  still match. Turn start binds the restatement to the journal predecessor.
+  Operator pauses keep a matching earlier watchdog expiry for explicit resume.
+
 ## 2026-11-21
 
 - **The root decision history is exempt from the topical line limit.** The

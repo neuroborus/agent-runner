@@ -65,13 +65,18 @@ export function attachAvailability(
         await onCompleted?.(next);
         return next;
       },
-      async scheduleAvailabilityRetry(_lease, input, { pipelineState } = {}) {
+      async scheduleAvailabilityRetry(
+        _lease,
+        input,
+        { pipelineState, reconciledTurn } = {},
+      ) {
         const previous = fixture.currentRun.availabilityRetry;
         const policy = { initialDelayMs: 5000, maxDelayMs: 7000 };
         const attempt = (previous?.attempt ?? 0) + 1;
         const delayMs = availabilityDelayMs(policy, attempt);
         const episode = {
           ...input,
+          reconciledRevision: fixture.currentRun.revision,
           id: previous?.id ?? randomUUID(),
           attempt,
           delayMs,
@@ -80,6 +85,7 @@ export function attachAvailability(
         const next = await transition({
           availabilityPolicy: policy,
           availabilityRetry: episode,
+          ...(reconciledTurn === undefined ? {} : { activeTurn: null }),
           ...(pipelineState === undefined ? {} : { pipelineState }),
         });
         scheduled.push(next);
@@ -96,20 +102,31 @@ export function attachAvailability(
     return next;
   }
   runtime.transition = async (patch, options) => {
+    if (options?.retainProviderRecovery) responseRole = null;
     const completed = await complete({ patch });
     return completed ?? transition(patch, options);
   };
   const finish = runtime.finishAgentTurn.bind(runtime);
-  runtime.finishAgentTurn = async (turn) => {
-    await complete();
-    return finish(turn);
+  runtime.finishAgentTurn = async (turn, options) => {
+    await complete(options);
+    return finish(turn, options);
   };
   for (const [role, adapter] of Object.entries(runtime.adapters)) {
     const run = adapter.run.bind(adapter);
     adapter.run = async (request) => {
-      const result = await run(request);
-      responseRole = role;
-      return result;
+      try {
+        const result = await run(request);
+        responseRole = role;
+        return result;
+      } catch (cause) {
+        if (
+          runtime.authentication?.eligible(cause) ||
+          runtime.outputExhaustion?.eligible(cause)
+        ) {
+          responseRole = role;
+        }
+        throw cause;
+      }
     };
   }
   return { scheduled, delays };

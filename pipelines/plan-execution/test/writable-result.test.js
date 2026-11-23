@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { customExecutionFixture } from "../../../test/support/index.js";
 import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
   attachAvailability,
   availabilityFailure,
 } from "../../../test/support/availability.js";
+import { modelCatalogMiss } from "../../../test/support/model-catalog.js";
 import {
   attachOutputExhaustion,
   outputExhaustion,
@@ -28,6 +33,8 @@ import {
   FINDING_RECOVERY_SCHEMA,
 } from "../src/schemas.js";
 import {
+  bootstrapReady,
+  clarificationReady,
   createFixture,
   implementationCompleted,
   finalizationPassed,
@@ -35,6 +42,7 @@ import {
   resolution,
   reviewFindings,
   reviewApproved,
+  reconciliationResolved,
   checkAndFix,
   cleanConfirmation,
   implementationBlocked,
@@ -245,6 +253,73 @@ test("legacy blocked recovery inspects unfinished work before explicitly authori
   );
   assert.equal(done.pipelineState.completedCommits.length, 1);
   assert.equal(fixture.calls.reviewer.length, 4); // Bootstrap, original review, renewed review, terminal confirmation.
+});
+
+test("a catalog miss during continued repair offers only a new read-only allowance", async (t) => {
+  const miss = modelCatalogMiss();
+  let writes = 0;
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      { ...resolution({ id: "R1", decision: "FIX" }), reason: "invalid" },
+      unfinished(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema !== FINDING_RESOLUTION_SCHEMA ||
+        request.access !== "workspace-write"
+      )
+        return;
+      if (++writes === 2) throw miss;
+      await writeFile(join(request.cwd, "repair.txt"), "unfinished\n");
+    },
+  });
+  fixture.runtime.catalogRetry = {
+    code: "ERR_MODEL_CATALOG_RETRY",
+    eligible: (cause) => cause === miss,
+    hasWritableNoEffect: ({ phase }) => phase === "resolve-findings",
+    hasPossibleEffect: () => false,
+    resuming: () => false,
+    claimResume: () => false,
+    details: (role, checkpoint) => ({
+      code: "ERR_MODEL_CATALOG_RETRY",
+      role,
+      checkpoint,
+    }),
+  };
+
+  const repair = await fixture.run();
+  assert.equal(repair.pause.reason, "finding_repair_required");
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "writable_output_invalid");
+  assert.equal(paused.activeTurn, null);
+  const checkpoint = paused.pipelineState.writableResult;
+  assert.equal(checkpoint.stage, "exhausted");
+  assert.deepEqual(
+    checkpoint.blockers,
+    repair.pipelineState.writableResult.blockers,
+  );
+  assert.equal(checkpoint.attempts, 1);
+  assert.equal(checkpoint.additionalAttempts, 0);
+  assert.deepEqual(paused.counters, repair.counters);
+
+  const { nextActions } = planExecutionPipeline.projections.pause(paused);
+  assert.deepEqual(nextActions, [{ type: "resume", action: null }]);
+  const resumed = await runPlanExecution({
+    run: structuredClone(paused),
+    action: nextActions[0].action,
+    runtime: fixture.runtime,
+    settings: paused.pipelineState.settings,
+  });
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.counters.fixRounds, paused.counters.fixRounds);
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    ["workspace-write", "read-only", "workspace-write", "read-only"],
+  );
 });
 
 test("an uncharged unfinished repair needs the existing explicit fix-budget grant", async (t) => {
@@ -655,6 +730,8 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
     const invalid = { ...valid, reason: "PRIVATE_REJECTED_VALUE" };
     let exhausted = false;
     let publicationInterrupted = false;
+    let resumeInterrupted = false;
+    let retryCheckpoint;
     const fixture = await createFixture(t, {
       workWorker: [
         ...(phase === "IMPLEMENT" ? [] : [implementationCompleted()]),
@@ -683,6 +760,8 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         else if (!exhausted) {
           exhausted = true;
           throw outputExhaustion();
+        } else {
+          retryCheckpoint = fixture.currentRun.pipelineState.writableResult;
         }
       },
       onTransition(run) {
@@ -693,6 +772,19 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         ) {
           publicationInterrupted = true;
           throw new Error("Exhaustion publication response interrupted");
+        }
+        if (
+          phase === "RESOLVE_FINDINGS" &&
+          run.pipelineState.writableResult?.stage === "retry-ready" &&
+          !resumeInterrupted
+        ) {
+          resumeInterrupted = true;
+          throw Object.assign(
+            new Error("Resume publication response interrupted"),
+            {
+              code: "ERR_RUN_REVISION_CHANGED",
+            },
+          );
         }
       },
     });
@@ -745,18 +837,21 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
       );
     }
-    const calls = fixture.calls.worker.length;
-    const fingerprint = saved.pipelineState.writableResult.candidateFingerprint;
-    const paused = await fixture.run();
-    assert.equal(paused.pause.reason, "writable_output_invalid");
-    assert.equal(paused.pipelineState.writableResult.attempts, 1);
-    assert.equal(paused.pipelineState.writableResult.additionalAttempts, 0);
-    assert.equal(
-      paused.pipelineState.writableResult.candidateFingerprint,
-      fingerprint,
-    );
-    assert.equal(fixture.calls.worker.length, calls);
+    if (phase === "RESOLVE_FINDINGS") {
+      await assert.rejects(
+        fixture.run(),
+        /Resume publication response interrupted/u,
+      );
+      assert.equal(retryCheckpoint, undefined);
+      assert.equal(fixture.currentRun.activeTurn, null);
+    }
     const done = await fixture.run();
+    assert.equal(retryCheckpoint.attempts, 1);
+    assert.equal(retryCheckpoint.additionalAttempts, 0);
+    assert.equal(
+      retryCheckpoint.candidateFingerprint,
+      saved.pipelineState.writableResult.candidateFingerprint,
+    );
     assert.equal(done.pipelineState.workflowState, "DONE");
     assert.equal(done.counters.fixRounds, phase === "IMPLEMENT" ? 0 : 1);
     assert.equal(done.pipelineState.completedCommits.length, 1);
@@ -868,6 +963,128 @@ test("availability recovery within restatement retains its one consumed output a
     ),
   );
 });
+
+const SCOPE_ARTIFACT = "LOCAL_ARTIFACTS/check.json";
+const scopeFailures = {
+  availability: availabilityFailure,
+  catalog: modelCatalogMiss,
+  authentication: authenticationFailure,
+  "output exhaustion": outputExhaustion,
+};
+
+async function createScopeFixture(t, failure, { changeDuringAttempt }) {
+  const cause = scopeFailures[failure]();
+  const infrastructure = [
+    ...bootstrapReady("Worker").validationInfrastructure,
+    SCOPE_ARTIFACT,
+  ];
+  let failed = false;
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "LOCAL_ARTIFACTS"));
+      await writeFile(join(projectPath, SCOPE_ARTIFACT), "{}\n");
+    },
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: infrastructure,
+      },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        validationInfrastructure: infrastructure,
+      },
+    ],
+    workWorker: [malformed(), implementationCompleted()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema !== IMPLEMENTATION_SCHEMA ||
+        request.access !== "read-only" ||
+        failed
+      )
+        return;
+      failed = true;
+      if (changeDuringAttempt) await changeScopeArtifact(request.cwd);
+      throw cause;
+    },
+  });
+  const availability = attachAvailability(fixture);
+  attachAuthentication(fixture);
+  attachOutputExhaustion(fixture);
+  fixture.runtime.catalogRetry = {
+    code: "ERR_MODEL_CATALOG_RETRY",
+    eligible: (candidate) => candidate === cause && failure === "catalog",
+    hasWritableNoEffect: () => false,
+    hasPossibleEffect: () => false,
+    resuming: () => false,
+    claimResume: () => false,
+    details: (role, checkpoint) => ({
+      code: "ERR_MODEL_CATALOG_RETRY",
+      role,
+      checkpoint,
+    }),
+  };
+  return { availability, fixture };
+}
+
+function changeScopeArtifact(projectPath) {
+  return writeFile(join(projectPath, SCOPE_ARTIFACT), '{"changed":true}\n');
+}
+
+function assertScopeDriftPause(fixture, paused) {
+  assert.equal(paused.pause.reason, "unsafe_git_state");
+  assert.equal(
+    paused.pause.code,
+    "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+  );
+  assert.equal(paused.activeTurn, null);
+  const reservation = paused.pipelineState.writableResult;
+  assert.equal(reservation.stage, "correcting");
+  assert.equal(reservation.attempts, 1);
+  assert.equal(reservation.additionalAttempts, 0);
+  assert.equal(paused.counters.fixRounds, 0);
+  assert.deepEqual(
+    resultCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
+  assert.equal(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.writableResult?.stage === "retry-ready",
+    ),
+    false,
+  );
+}
+
+for (const failure of Object.keys(scopeFailures)) {
+  test(`restatement ${failure} recovery rechecks its validation scope before publishing a continuation`, async (t) => {
+    const { availability, fixture } = await createScopeFixture(t, failure, {
+      changeDuringAttempt: true,
+    });
+    assertScopeDriftPause(fixture, await fixture.run());
+    assert.equal(availability.delays.length, 0);
+  });
+}
+
+for (const failure of ["authentication", "output exhaustion"]) {
+  test(`explicit resume after restatement ${failure} rechecks its validation scope`, async (t) => {
+    const { fixture } = await createScopeFixture(t, failure, {
+      changeDuringAttempt: false,
+    });
+    const paused = await fixture.run();
+    assert.equal(
+      paused.pause.reason,
+      failure === "authentication"
+        ? "authentication_required"
+        : "output_exhausted",
+    );
+    await changeScopeArtifact(fixture.projectPath);
+    assertScopeDriftPause(fixture, await fixture.run());
+  });
+}
 
 test("frozen input and native-policy changes stop correction before invoking it", async (t) => {
   const fixture = await createFixture(t, {

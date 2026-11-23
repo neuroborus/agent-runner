@@ -26,6 +26,27 @@ attempt, and recovery status. Trusted commands, constrained commit execution,
 runner-owned handoff, usage limits, operator stops, and availability backoff
 retain their separate policies. See the provider contract (`docs/product/PROVIDER_MODEL.md#provider-inactivity`).
 
+## Model catalog misses
+
+A complete Codex catalog miss can pause an exercised explicit model for resume at
+the same checkpoint. The Runner requires prior completion on the frozen role
+and no effect from the failing invocation. The pause carries
+`ERR_MODEL_CATALOG_RETRY` with reason `backend_unavailable`, or
+`provider_interrupted` for init. The Runner keeps the exact role and checkpoint
+internally; status shows the saved resume state and any offered action. Once
+the model is available to the selected provider again, resume the same run
+only when status offers the null action; it uses the same model, profile and
+effort after
+repository and input checks. Catalog recovery adds no automatic retry,
+backoff, fallback model or source refork, and keeps reservations, counters,
+and spent provider allowances. A first use, a source fork, a miss during
+native recovery, an invalid or incomplete catalog (`model_catalog_invalid`)
+and unsupported effort (`effort_unsupported`) authorize no retry.
+A consumed commit authorization requires separate durable proof and Git
+verification before it can be renewed. Invalid or incomplete catalogs and
+unsupported effort grant no COMMIT retry. See the provider model
+(`docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery`).
+
 ## Availability and authentication
 
 `availabilityRetryMaxDelayMs` sets the frozen common availability-policy ceiling

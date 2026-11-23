@@ -9,6 +9,7 @@ import {
 } from "../../../test/support/output-exhaustion.js";
 import {
   ClaudeAdapterError,
+  CodexAdapterError,
   normalizeAdapterFailure,
 } from "../../../src/agents/index.js";
 import { isolateGitEnvironment } from "../../../src/git/index.js";
@@ -565,6 +566,70 @@ test("readiness refusals preserve the candidate without offering blind COMMIT re
       JSON.stringify(fixture.transitions),
       /PRIVATE_READINESS/u,
     );
+  }
+});
+
+test("terminal model selection failures verify consumed COMMIT without offering a fresh authorization", async (t) => {
+  for (const [code, diagnosticClass] of [
+    ["ERR_CODEX_PROTOCOL", "model_catalog_invalid"],
+    ["ERR_UNSUPPORTED_EFFORT", "effort_unsupported"],
+  ]) {
+    let verifications = 0;
+    const fixture = await createFixture(t, {
+      onCommitVerify() {
+        verifications++;
+        if (verifications === 1) {
+          throw Object.assign(new Error("Verification was interrupted."), {
+            code: "ERR_FAKE_COMMIT_VERIFICATION",
+          });
+        }
+      },
+      onRoleRun(_role, request) {
+        if (request.access === "local-commit") {
+          throw normalizeAdapterFailure(
+            "codex",
+            new CodexAdapterError("PRIVATE_CATALOG_RESPONSE", {
+              code,
+              diagnosticClass,
+              effectStarted: false,
+            }),
+          );
+        }
+      },
+    });
+    const interrupted = await fixture.run();
+    assert.equal(interrupted.pipelineState.pendingCommit.status, "consumed");
+    assert.doesNotThrow(() =>
+      planExecutionPipeline.validateResumeAction(interrupted, null),
+    );
+    fixture.persistPipelineState(structuredClone(interrupted.pipelineState));
+
+    const paused = await fixture.run();
+    assert.equal(paused.pipelineState.pendingCommit, null);
+    assert.equal(paused.pause.reason, "commit_failed");
+    assert.equal(paused.pause.diagnosticClass, diagnosticClass);
+    assert.equal(
+      paused.pipelineState.reviewedFingerprint,
+      interrupted.pipelineState.reviewedFingerprint,
+    );
+    const projection = planExecutionPipeline.projections.pause(paused);
+    assert.equal(projection.resumeState, null);
+    assert.deepEqual(projection.nextActions, []);
+    assert.deepEqual(projection.evidence, [
+      `Adapter diagnostic: ${diagnosticClass}.`,
+    ]);
+    assert.throws(
+      () => planExecutionPipeline.validateResumeAction(paused, null),
+      /separately authorized follow-up/u,
+    );
+    assert.equal((await fixture.run()).pause.reason, "commit_failed");
+    assert.equal(verifications, 2);
+    assert.equal(
+      fixture.calls.worker.filter(({ access }) => access === "local-commit")
+        .length,
+      1,
+    );
+    assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_CATALOG_RESPONSE/u);
   }
 });
 

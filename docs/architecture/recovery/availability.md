@@ -18,12 +18,19 @@ cannot claim a custom policy or pending episode.
 
 The state service's `scheduleAvailabilityRetry` accepts an inspected revision,
 active role, bounded logical checkpoint, finite provider-neutral reason, and
-reconciled content fingerprint. It requires retired turn/process/resource
-ownership and the existing exclusive mutation lease, then appends the complete
-event before replacing state and returning. The episode stores a UUID, role,
-checkpoint, reason, attempt, delay, scheduling time, retry deadline, content
-fingerprint, and reconciled revision. The caller owns repository reconciliation;
-a hash-shaped value alone does not prove Git safety.
+reconciled content fingerprint. It requires retired process and resource
+ownership and the existing exclusive mutation lease. Scheduling ordinarily
+requires the turn to have retired. A reconciled coding-pipeline restatement can
+retire its exact turn and record its read-only continuation in the same event
+as the next backoff. Admission and replay verify the owning pipeline's
+consumed reservation and the reconciled candidate fingerprint against the
+recorded turn start. They require the latest provider attempt to have started
+after that turn start and failed at the backoff's role and checkpoint. The
+service appends the complete event before replacing state and returning. The
+episode stores a UUID, role, checkpoint, reason, attempt, delay, scheduling
+time, retry deadline, content fingerprint, and reconciled revision. The caller
+owns repository reconciliation. A hash-shaped value alone does not prove Git
+safety.
 
 Delays are `min(maxDelayMs, 5000 * 2^(attempt - 1))`: at the default ceiling,
 5, 10, 20, 40, 80, 160, 320, 640, 1280, 1800 seconds, then 1800 repeatedly.
@@ -53,12 +60,19 @@ published to CLI/MCP activity with bounded role, checkpoint, normalized reason,
 attempt, delay, and deadline. Status projects the same fields in `availabilityRetry`.
 A successfully returned provider response clears the episode at repository
 reconciliation, before deterministic output validation; rejected output can
-therefore still mark provider progress. A normalized authentication-required
-response instead retires the superseded episode before persisting its distinct
-operator pause. Reconciled content and correction accounting are persisted
-atomically with either transition. Check/fix mutation claims are compared against
-the attempt's starting fingerprint, including any safe content retained from
-earlier failed attempts. Other availability errors, tool activity, partial output,
+therefore still mark provider progress. Reconstructing plan context for a
+pending narrative review preserves the review's episode until that review
+settles. A normalized authentication-required
+response retires the superseded availability episode as part of settling its
+distinct operator pause. Coding-pipeline restatements retain the consumed
+attempt and any spent inactivity allowance after authentication, and retain
+their provider recovery episodes through output exhaustion. Polishing journals
+acceptance of a restatement's provider retry when clearing its pause, then
+consumes that continuation with the next read-only turn start. Reconciled
+content and correction accounting are persisted atomically with either pause.
+Check/fix mutation claims are compared against the attempt's starting
+fingerprint, including any safe content retained from earlier failed attempts.
+Other availability errors, tool activity, partial output,
 session replacement, operator resume, and restart do not reset it. Persistence or
 wait failures retain the checkpoint and propagate without inventing a terminal
 pipeline failure.
@@ -87,3 +101,21 @@ authority, workflow position, review or correction evidence, or handoff state.
 Null provisional reports retain the existing read-only discovery barrier.
 Foreground CLI owner loss requires resume; detached MCP ownership outlives a
 client timeout or disconnect.
+
+## Catalog restatement episodes
+
+[Explicit-model catalog recovery](journal.md#explicit-model-catalog-recovery)
+adds no backoff episode. Before read-only restatement, the owning pipeline
+durably settles or rebinds any existing availability or inactivity episode to
+the consumed reservation and its continuation. A coding restatement retains
+any original recovery episode under its original reservation identity,
+including its reconciliation evidence and spent allowance, across restart. It
+resumes only through the bound checkpoint, and a later provider retry draws on
+the remaining allowance without a new backoff from the catalog pause.
+Polishing applies the same freshness rule as
+[inactivity continuations](inactivity.md#catalog-restatement-continuations) to
+the reconciled revision of availability backoff after turn retirement. Without
+an invocation marker, certified polishing history must tie the backoff to the
+latest retired restatement or the watchdog expiry to the latest restatement's
+active provider attempt, under the same checkpoint and content.
+A successful reconciled response retires the episode through its existing owner.

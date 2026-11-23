@@ -304,6 +304,23 @@ inputs, Git controls, and source-session lineage remain unchanged. A retained
 legacy terminal-Reviewer correction on an immutable path is translated to the
 new terminal-confirmation correction namespace.
 
+Pipeline state version 46 saves the normalized validation-migration
+disagreement before dispatching the Arbiter. Resume returns directly to that
+disagreement with any pending correction and its spent allowance intact.
+At first catalog pause publication, admission and replay preserve the suspended
+workflow, role inventories, disagreement, correction ledger, frozen inputs and
+spent counters. Direct and narrative pauses retain that same reservation
+through retry. The ordered version-45 migration starts
+with no recorded disagreement. A legacy Arbiter catalog pause without that
+context offers no retry.
+
+Before changing pipeline state, the version-43 through version-45 migrations
+verify a pending clarification append's original checkpoint, then rebind its
+fingerprint without changing the intent or either transcript hash. The
+version-45 migration verifies the append binding against the original
+checkpoint before rebinding it to version 46 and rejects an invalid original
+binding. Journal replay verifies the same rebinding.
+
 Common run-envelope version 3 independently adds nullable bounded active
 provider role and phase. Version-1 and version-2 envelopes project it as `null`
 without rewriting; the next mutating continuation persists the explicit runtime

@@ -11,6 +11,7 @@ import {
   combinedReview,
   polishingPolicy,
 } from "./mode-policy.js";
+import { prepareResolutionRecovery } from "./resolution-recovery.js";
 import {
   createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
@@ -20,6 +21,11 @@ import {
 } from "./workflow.js";
 import {
   assertRun as validateRun,
+  assertRestatementCatalogPause,
+  assertDirectReadOnlyCatalogPause,
+  assertReadOnlyGateCatalogPause,
+  assertValidationMigrationCatalogPause,
+  assertWritableGateCatalogPause,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
@@ -28,11 +34,15 @@ import {
   finalizationDiagnostic,
   findingFingerprint,
   isFinalizationPolicy,
+  matchesResolutionAvailabilityRetirement,
+  matchesResolutionCatalogReservation,
+  matchesGateCatalogReservation,
+  matchesValidationMigrationCatalogReservation,
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
-  resolutionFactsFingerprint,
   sha256,
   snapshotChangeEvidence,
+  upgradeLegacyResolutionCorrection,
 } from "./workflow-contract.js";
 
 export {
@@ -1241,6 +1251,66 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
+  assertCatalogTransition(
+    previous,
+    next,
+    _activity,
+    retryCode,
+    turnStart,
+    commitRejection,
+    readOnlyAttempt,
+    writableAttempt,
+  ) {
+    if (commitRejection !== undefined)
+      throw new Error("Polishing has no COMMIT catalog proof.");
+    const restatement = assertRestatementCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+      writableAttempt,
+    );
+    const writableGate = assertWritableGateCatalogPause(
+      previous,
+      next,
+      retryCode,
+    );
+    const readOnlyGate = assertReadOnlyGateCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    const migration = assertValidationMigrationCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    return (
+      restatement ||
+      writableGate ||
+      readOnlyGate ||
+      migration ||
+      assertDirectReadOnlyCatalogPause(
+        previous,
+        next,
+        retryCode,
+        turnStart,
+        readOnlyAttempt,
+      )
+    );
+  },
+  matchesAvailabilityRetirement: matchesResolutionAvailabilityRetirement,
+  readRestatementStart: (state) =>
+    state.resolutionCorrection?.restatementStartedAfter,
+  matchesCatalogReservation: (previous, next, binding) =>
+    matchesValidationMigrationCatalogReservation(previous, next, binding) ??
+    matchesResolutionCatalogReservation(previous, next, binding) ??
+    matchesGateCatalogReservation(previous, next, binding),
   stateVersion: 25,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
@@ -1300,27 +1370,16 @@ export const polishingPipeline = Object.freeze({
     },
     // Shape upgrade only: retained checkpoints grant no new repair authority.
     24: (run) => {
-      const checkpoint = run.pipelineState.resolutionCorrection;
-      if (
-        checkpoint !== null &&
-        (checkpoint.schemaVersion !== 1 ||
-          Object.hasOwn(checkpoint, "repair") ||
-          Object.hasOwn(checkpoint, "factsFingerprint"))
-      )
+      const resolutionCorrection = upgradeLegacyResolutionCorrection(
+        run.pipelineState,
+      );
+      if (resolutionCorrection === undefined)
         throw new PolishingWorkflowError(
           "Legacy state cannot own finding repair authority.",
         );
       return Object.freeze({
         ...run.pipelineState,
-        resolutionCorrection:
-          checkpoint === null
-            ? null
-            : Object.freeze({
-                ...checkpoint,
-                schemaVersion: 2,
-                repair: null,
-                factsFingerprint: resolutionFactsFingerprint(run.pipelineState),
-              }),
+        resolutionCorrection,
       });
     },
   }),
@@ -1340,6 +1399,7 @@ export const polishingPipeline = Object.freeze({
     status: projectStatus,
   }),
   validateResumeAction,
+  prepareRecovery: prepareResolutionRecovery,
   workflow: Object.freeze({
     createState: createPolishingState,
     run: runPolishing,

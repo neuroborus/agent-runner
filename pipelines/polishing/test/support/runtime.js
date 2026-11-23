@@ -1572,7 +1572,7 @@ async function createFixture(
         currentRun = await store.transitionRun(lease, patch, options);
         return currentRun;
       };
-      runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+      runtime.startAgentTurn = async (activeTurn, options = {}) => {
         currentRun = await store.startAgentTurn(lease, activeTurn, {
           activity: {
             actor: activeTurn.role,
@@ -1580,7 +1580,7 @@ async function createFixture(
             kind: "turn-started",
             message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
           },
-          ...(pipelineState === undefined ? {} : { pipelineState }),
+          ...options,
         });
         return currentRun;
       };
@@ -1605,7 +1605,15 @@ async function createFixture(
       };
       return currentRun;
     };
-    runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+    runtime.startAgentTurn = async (
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) => {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? currentRun.pipelineState,
+          currentRun.revision,
+        ) ?? pipelineState;
       currentRun = {
         ...currentRun,
         ...(pipelineState === undefined ? {} : { pipelineState }),
@@ -1651,7 +1659,7 @@ async function createFixture(
     return currentRun;
   }
 
-  async function recover() {
+  async function recover(prepare) {
     if (stateStore === "memory") {
       assertRun(currentRun);
       installStoreRuntime();
@@ -1661,12 +1669,14 @@ async function createFixture(
     const reopened = createRunStore({ stateRoot });
     lease = await reopened.acquireRunLease(currentRun.runId);
     currentRun = await reopened.recoverRun(lease);
+    if (prepare !== undefined)
+      currentRun = await prepare(reopened, lease, currentRun);
     runtime.transition = async (patch, options) => {
       transitions.push({ patch, options });
       currentRun = await reopened.transitionRun(lease, patch, options);
       return currentRun;
     };
-    runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+    runtime.startAgentTurn = async (activeTurn, options = {}) => {
       currentRun = await reopened.startAgentTurn(lease, activeTurn, {
         activity: {
           actor: activeTurn.role,
@@ -1674,7 +1684,7 @@ async function createFixture(
           kind: "turn-started",
           message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
         },
-        ...(pipelineState === undefined ? {} : { pipelineState }),
+        ...options,
       });
       return currentRun;
     };

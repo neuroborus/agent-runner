@@ -61,6 +61,227 @@ import {
   strandedPreWorkOwner,
 } from "./support/index.js";
 
+import { availabilityFailure } from "./support/availability.js";
+import {
+  modelCatalogMiss,
+  withModelCompletion,
+} from "./support/model-catalog.js";
+
+test("catalog commit misses renew only after a journaled pre-executor proof", async (t) => {
+  for (const kind of [
+    "proven",
+    "without-receipt",
+    "pre-journal-stop",
+    "pre-journal-stop-after-availability",
+    "post-journal-stop",
+  ]) {
+    const retried = kind === "pre-journal-stop-after-availability";
+    const stops = kind.endsWith("-stop") || retried;
+    const fixture = await operatorFixture(t, "plan-execution");
+    let now = Date.now();
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      clock: () => new Date(now),
+    });
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    const authorizations = [];
+    const missAt = retried ? 2 : 1;
+    let raced = false;
+    adapter.run = async (request) => {
+      if (request.access === "local-commit") {
+        authorizations.push(request.authorizationId);
+        if (retried && authorizations.length === 1)
+          throw availabilityFailure({ commit: true });
+        if (authorizations.length === missAt) throw modelCatalogMiss(request);
+      }
+      const response = await runRole(request);
+      return kind === "without-receipt"
+        ? response
+        : withModelCompletion(response, request);
+    };
+    const runStore = {
+      ...store,
+      async transitionRun(lease, patch, options) {
+        if (
+          !stops ||
+          raced ||
+          patch.pipelineState?.pendingCommit?.preEffectRejection?.catalog ===
+            undefined
+        )
+          return store.transitionRun(lease, patch, options);
+        raced = true;
+        const journaled = kind === "post-journal-stop";
+        const run = journaled
+          ? await store.transitionRun(lease, patch, options)
+          : await store.loadRun(lease.runId);
+        await store.requestOperatorStop({
+          runId: run.runId,
+          kind: "pause_requested",
+          expectedRevision: run.revision,
+          idempotencyKey: "catalog-proof-race",
+        });
+        if (journaled)
+          throw new Error("Owner interrupted after proof publication.");
+        return store.transitionRun(lease, patch, options);
+      },
+    };
+    const adapters = { codex: adapter };
+    const runner = createRunner({
+      adapters,
+      availabilityClock: () => now,
+      availabilityWait: async (delay) => {
+        now += delay;
+      },
+      clarifications: createClarificationService({ interactive: false }),
+      loadConfiguration: configurationLoader(),
+      runStore,
+    });
+    const { run: created } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "worker-model" } },
+    });
+    const { runId } = created;
+    const { run: paused } = await runner.resume({ runId });
+    const cold = runnerFor(fixture, adapters, { runStore: store });
+    assert.equal(authorizations.length, missAt);
+    assert.equal(new Set(authorizations).size, missAt);
+    assert.equal(paused.pipelineState.completedCommits.length, 0);
+    if (stops) assert.equal(raced, true);
+    if (kind === "proven" || kind === "post-journal-stop") {
+      const retry = stops ? (await cold.resume({ runId })).run : paused;
+      assert.equal(retry.pause.reason, "backend_unavailable");
+      assert.equal(retry.pipelineState.pendingCommit, null);
+      assert.equal(authorizations.length, 1);
+      const done = (await cold.resume({ runId })).run;
+      assert.equal(done.pipelineState.completedCommits.length, 1);
+      assert.equal(authorizations.length, 2);
+    } else {
+      assert.equal(
+        paused.pause.reason,
+        stops ? "operator_paused" : "commit_failed",
+      );
+      assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+      assert.equal(
+        paused.pipelineState.pendingCommit.authorization.id,
+        authorizations.at(-1),
+      );
+      assert.equal(paused.pipelineState.pendingCommit.preEffectRejection, null);
+      if (stops) await cold.resume({ runId });
+      const verified = (await cold.resume({ runId })).run;
+      assert.equal(verified.pipelineState.pendingCommit.status, "consumed");
+      assert.equal(verified.pipelineState.completedCommits.length, 0);
+      assert.equal(authorizations.length, missAt);
+    }
+  }
+});
+
+test("operator stop after a writable catalog miss retains the original candidate on drift", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const implementing = pipelineId === "plan-execution";
+    const fixture = await operatorFixture(t, pipelineId);
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    adapter.run = async (request) => {
+      if (
+        !implementing &&
+        request.prompt.includes("Review the complete current change set")
+      ) {
+        return {
+          structured: {
+            status: "FINDINGS",
+            findings: [
+              {
+                id: "R1",
+                file: "source.js",
+                problem: "The candidate needs a repair.",
+                reason: "The repair is required by the task.",
+                suggestedAction: "Add the repair.",
+              },
+            ],
+            question: "",
+            options: [],
+            whyBlocked: "",
+            evidence: [],
+          },
+          sessionId: request.session?.id ?? "review-session",
+        };
+      }
+      if (
+        request.access === "workspace-write" &&
+        request.prompt.includes(
+          implementing
+            ? "Implement the changes described"
+            : "Resolve every current blocker",
+        )
+      )
+        throw modelCatalogMiss(request);
+      return runRole(request);
+    };
+    let beforeStop;
+    const runStore = {
+      ...store,
+      async recordObservationBatch(lease, identity, records, options) {
+        const run = await store.recordObservationBatch(
+          lease,
+          identity,
+          records,
+          options,
+        );
+        if (options.status === "failed") {
+          beforeStop = run;
+          await writeFile(
+            join(fixture.projectPath, "concurrent.txt"),
+            "drift\n",
+          );
+          await store.requestOperatorStop({
+            runId: run.runId,
+            kind: "pause_requested",
+            expectedRevision: run.revision,
+            idempotencyKey: "stop-after-catalog-miss",
+          });
+        }
+        return run;
+      },
+    };
+    const { run: stopped } = await runnerFor(
+      fixture,
+      { codex: adapter },
+      { runStore },
+    ).run({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "worker-model" } },
+    });
+    assert.ok(beforeStop, pipelineId);
+    assert.equal(
+      beforeStop.activeTurn.phase,
+      implementing ? "implement" : "resolve-findings",
+    );
+    assert.equal(stopped.pause.reason, "operator_paused");
+    assert.equal(
+      stopped.pause.operatorResume.pause?.code,
+      "ERR_MODEL_CATALOG_WORKSPACE_CHANGED",
+    );
+    assert.equal(stopped.activeTurn, null);
+    assert.deepEqual(stopped.counters, beforeStop.counters);
+    const reservation = implementing
+      ? "writableResult"
+      : "resolutionCorrection";
+    for (const field of [reservation, "repositoryBaseline", "findings"]) {
+      assert.deepEqual(
+        stopped.pipelineState[field],
+        beforeStop.pipelineState[field],
+      );
+    }
+  }
+});
+
 const checkpointCleanups = [];
 
 for (const [pipelineId, kind, boundary] of [

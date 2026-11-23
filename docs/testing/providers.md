@@ -57,6 +57,22 @@ failed processes, order-independent mixed batches and local-commit
 tests own their terminal registration, legacy loading, redaction, cold pause
 and printed line.
 
+## Explicit-model catalog misses
+
+Focused adapter and COMMIT policy tests distinguish malformed RPC envelopes,
+invalid and capped catalog pages, and unsupported effort from unrelated
+pre-executor rejections. Repeated or unmatched catalog replies and malformed
+shutdown output cannot establish catalog absence. The adapter rejects reroutes
+with request IDs and reroutes during App Server shutdown before attestation or
+commit execution. It also rejects thread model conflicts while accepting catalog
+aliases. Shutdown reroutes invalidate provisional misses and prevent native
+fresh-thread recovery while preserving provider availability classification.
+An unsuccessful provider exit prevents catalog retry, attestation, and commit
+execution, even when stdout drains successfully. An interrupted drain,
+unsuccessful exit, or exit before the next catalog page keeps the lookup
+terminal as `model_catalog_invalid`. [Runner coverage](runner.md#explicit-model-catalog-recovery)
+owns composed retry and pause regressions.
+
 ## Restricted-host launchers
 
 Claude restricted-host launcher changes use deterministic public-adapter tests

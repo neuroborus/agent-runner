@@ -70,6 +70,16 @@ for the operator procedure. For the exact polishing contract, open
 `pipelines/polishing/docs/review.md` in the matching source checkout and read
 **Finding-resolution result recovery**.
 
+When status offers the null action, a
+[model catalog pause](provider-recovery.md#model-catalog-misses) resumes
+through `run_resume` with a null action, the current revision and an
+idempotency key, at its saved checkpoint. MCP projects the same pause and
+actions as [CLI recovery](cli-recovery.md#model-catalog-pauses): a plan
+execution `commit_failed` catalog pause without journaled pre-executor proof
+offers no fresh COMMIT authorization. It has no resume state when no
+authorization remains; a retained consumed authorization resumes for
+verification only.
+
 ## Action-free resume
 
 Action-free recovery uses the same leased runner path through CLI and MCP.

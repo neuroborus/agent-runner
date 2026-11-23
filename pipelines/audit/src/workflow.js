@@ -52,6 +52,7 @@ function isOwnershipFailure(cause) {
     [
       "ERR_EXECUTION_PROCESS_ACTIVE",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
       "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
     ].includes(cause?.code)
   );
@@ -398,14 +399,21 @@ export async function runAuditDiscovery({
     try {
       await runtime.workspace.assertUnchanged(state().repositoryBaseline);
     } catch {
-      await finishReserved("interrupted");
+      if (current.modelCatalogResume == null) {
+        await finishReserved("interrupted");
+      }
       return { failure: "workspace_changed" };
     }
     const lazy = state().settings.mode === "lazy";
     const combined = state().settings.mode === "combined";
     const { contextKey: key, number } = auditCheckpoint(current, phase);
     const checkpoint = `audit:${phase}:read-only:${number}`;
+    const catalogCheckpoint = `${phase}:read-only:${number}`;
     const repository = state().repositoryBaseline;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      catalogCheckpoint,
+    );
     try {
       if (
         current.availabilityRetry != null &&
@@ -422,6 +430,7 @@ export async function runAuditDiscovery({
           role,
           checkpoint,
           repository,
+          continueEpisode: catalogResume,
         });
       }
     } catch (cause) {
@@ -442,6 +451,7 @@ export async function runAuditDiscovery({
       !reconstructing && previous
         ? { mode: "continue", id: previous.sessionId }
         : !reconstructing &&
+            !catalogResume &&
             recovery === null &&
             state().sourceForkRecovery !== key &&
             source !== null &&
@@ -451,6 +461,7 @@ export async function runAuditDiscovery({
           : undefined;
     const activeTurn = { role, phase };
     current = await runtime.startAgentTurn(activeTurn, {
+      ...(catalogResume ? { catalogCheckpoint } : {}),
       pipelineState: {
         ...state(),
         sourceForkConsumed:
@@ -560,6 +571,20 @@ export async function runAuditDiscovery({
       return { paused: true };
     }
     if (agentError !== undefined) {
+      if (runtime.catalogRetry?.eligible(agentError)) {
+        await save(
+          { ...state(), workflowState: "WAITING_FOR_USER" },
+          {
+            activeTurn: null,
+            pause: {
+              reason: "backend_unavailable",
+              resumeState,
+              ...runtime.catalogRetry.details(role, catalogCheckpoint),
+            },
+          },
+        );
+        return { paused: true };
+      }
       const exhausted = runtime.outputExhaustion?.eligible(agentError) === true;
       const authentication =
         runtime.authentication?.eligible(agentError) === true;
@@ -828,6 +853,7 @@ export async function runAuditDiscovery({
   if ((await inspectInputs()) === null) return current;
   const recovering =
     state().outputRecovery !== null ||
+    current.modelCatalogResume != null ||
     current.inactivityRecovery != null ||
     current.availabilityRetry != null ||
     [

@@ -84,6 +84,7 @@ export function createAvailabilityCoordinator({
       checkpoint,
       repository,
       pipelineState,
+      reconciledTurn,
     }) {
       return guarded(async () => {
         await monitor.check();
@@ -107,6 +108,7 @@ export function createAvailabilityCoordinator({
         validateRun({
           ...run,
           ...(pipelineState === undefined ? {} : { pipelineState }),
+          ...(reconciledTurn === undefined ? {} : { activeTurn: null }),
         });
         const next = await runStore.scheduleAvailabilityRetry(
           lease,
@@ -117,7 +119,7 @@ export function createAvailabilityCoordinator({
             contentFingerprint: repository.contentFingerprint,
             expectedRevision: run.revision,
           },
-          { pipelineState },
+          { pipelineState, reconciledTurn },
         );
         pending = true;
         await publish(
@@ -162,8 +164,11 @@ export function createAvailabilityCoordinator({
         return run;
       });
     },
-    async completed(role, { patch, expectedRevision } = {}) {
-      if (!pending) return;
+    async completed(
+      role,
+      { patch, expectedRevision, repositoryReconciled = true } = {},
+    ) {
+      if (!pending || !repositoryReconciled) return;
       return guarded(async () => {
         const run = await runStore.loadRun(runId);
         if (run.availabilityRetry == null) {

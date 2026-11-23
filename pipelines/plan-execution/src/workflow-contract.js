@@ -147,6 +147,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "validationInfrastructureFingerprint",
   "trustedValidation",
   "validationMigrationPending",
+  "validationMigrationDisagreement",
   "reviewResult",
   "reviewedFingerprint",
   "findings",
@@ -933,10 +934,35 @@ export function commitReadinessConstraint(diagnosticClass) {
   }
 }
 
+export function commitModelSelectionConstraint(diagnosticClass) {
+  switch (diagnosticClass) {
+    case "model_catalog_invalid":
+      return "The model catalog response was invalid or incomplete.";
+    case "effort_unsupported":
+      return "The selected reasoning effort is unsupported.";
+    default:
+      return null;
+  }
+}
+
 function hasExactFields(value, fields) {
   return (
     Object.keys(value).length === fields.length &&
     fields.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+export function isCommitCatalogRejectionProof(rejection) {
+  const proof = rejection?.catalog;
+  return (
+    isRecord(rejection) &&
+    hasExactFields(rejection, ["code", "recoverable", "catalog"]) &&
+    rejection.code === "ERR_CODEX_MODEL_UNAVAILABLE" &&
+    rejection.recoverable === false &&
+    isRecord(proof) &&
+    hasExactFields(proof, ["effect", "commitExecutor"]) &&
+    proof.effect === "none" &&
+    proof.commitExecutor === "not_started"
   );
 }
 
@@ -4847,6 +4873,9 @@ function normalizePendingCommit(value) {
     const hasOutputExhaustion =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "outputExhaustion");
+    const hasCatalog =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "catalog");
     const hasDiagnosticClass =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "diagnosticClass");
@@ -4859,6 +4888,7 @@ function normalizePendingCommit(value) {
         ...(hasAuthentication ? ["authentication"] : []),
         ...(hasOutputExhaustion ? ["outputExhaustion"] : []),
         ...(hasDiagnosticClass ? ["diagnosticClass"] : []),
+        ...(hasCatalog ? ["catalog"] : []),
       ],
       "Plan-execution pre-effect rejection",
     );
@@ -4868,18 +4898,24 @@ function normalizePendingCommit(value) {
       typeof value.preEffectRejection.recoverable !== "boolean" ||
       (hasDiagnosticClass &&
         !isAdapterDiagnosticClass(value.preEffectRejection.diagnosticClass)) ||
-      (commitReadinessConstraint(value.preEffectRejection.diagnosticClass) !==
-        null &&
+      ((commitReadinessConstraint(value.preEffectRejection.diagnosticClass) !==
+        null ||
+        commitModelSelectionConstraint(
+          value.preEffectRejection.diagnosticClass,
+        ) !== null) &&
         value.preEffectRejection.recoverable) ||
       [
         hasAvailability,
         hasAuthentication,
         hasOutputExhaustion,
         hasDiagnosticClass,
+        hasCatalog,
       ].filter(Boolean).length > 1
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
+    if (hasCatalog && !isCommitCatalogRejectionProof(value.preEffectRejection))
+      throw workflowError("Plan-execution commit catalog proof is invalid.");
     const proof = value.preEffectRejection.availability;
     if (hasAvailability) {
       assertExactFields(
@@ -4954,9 +4990,17 @@ export function normalizePipelineState(value) {
   if (!Object.hasOwn(value, "artifactRoot")) {
     value = { ...value, artifactRoot: "LOCAL_ARTIFACTS" };
   }
+  const { catalogReviewInfrastructureFingerprint, ...fields } = value;
   if (
-    Object.keys(value).length !== PIPELINE_STATE_FIELDS.size ||
-    Object.keys(value).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
+    Object.keys(fields).length !== PIPELINE_STATE_FIELDS.size ||
+    Object.keys(fields).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
+    (Object.hasOwn(value, "catalogReviewInfrastructureFingerprint") &&
+      (typeof catalogReviewInfrastructureFingerprint !== "string" ||
+        !HASH_PATTERN.test(catalogReviewInfrastructureFingerprint) ||
+        value.preflightComplete !== true ||
+        !["REVIEW", "CLEAN_CONFIRM", "WAITING_FOR_USER"].includes(
+          value.workflowState,
+        ))) ||
     !WORKFLOW_STATES.includes(value.workflowState) ||
     !["commit", "custom"].includes(value.planKind)
   ) {
@@ -5341,6 +5385,9 @@ export function normalizePipelineState(value) {
     "resolved summary",
   );
   const disagreement = normalizeDisagreement(value.bootstrapDisagreement);
+  const validationMigrationDisagreement = normalizeDisagreement(
+    value.validationMigrationDisagreement,
+  );
   const bootstrapCorrections = normalizeBootstrapCorrections(
     value.bootstrapCorrections,
   );
@@ -5502,6 +5549,19 @@ export function normalizePipelineState(value) {
       ["CLARIFY", "BOOTSTRAP", "DONE"].includes(value.workflowState))
   ) {
     throw workflowError("Plan-execution validation migration is inapplicable.");
+  }
+  if (
+    validationMigrationDisagreement !== null &&
+    (!value.validationMigrationPending ||
+      !policy.bootstrapArbitration ||
+      value.compatibilityCheckRequired ||
+      value.pendingCommit?.status === "consumed" ||
+      workerValidation?.capabilityRequirements == null ||
+      reviewerValidation?.capabilityRequirements == null)
+  ) {
+    throw workflowError(
+      "Plan-execution validation migration arbitration is inapplicable.",
+    );
   }
   if (
     value.candidateMigrationPending &&
@@ -6722,6 +6782,7 @@ export function createPlanExecutionState({
       validationInfrastructureFingerprint: null,
       trustedValidation: normalizedTrustedValidation,
       validationMigrationPending: false,
+      validationMigrationDisagreement: null,
       reviewResult: null,
       reviewedFingerprint: null,
       findings: Object.freeze([]),
@@ -6798,7 +6859,7 @@ function matchesWritableResultOutputCheckpoint(state, pause) {
   );
 }
 
-function matchesRefinementOutputCheckpoint(state, pause) {
+export function matchesRefinementOutputCheckpoint(state, pause) {
   if (
     !state.commitSizeAssessment.eligible ||
     state.pendingCommit !== null ||
@@ -6925,7 +6986,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 45 ||
+    run.pipelineStateVersion !== 46 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -7124,6 +7185,15 @@ export function assertRun(run) {
         (state.writableResult.fixCharged ? 1 : 0)
   )
     throw workflowError("Writable result correction accounting changed.");
+  if (
+    ["retry-ready", "inactivity-ready"].includes(state.writableResult?.stage) &&
+    run.activeTurn !== null
+  )
+    throw workflowError(
+      "A saved writable-result retry cannot already be active.",
+    );
+  if (state.writableResult?.restatementStartedAfter > run.revision)
+    throw workflowError("Writable result invocation revision is invalid.");
   const repair = state.writableResult;
   const repairNeedsBudget =
     repair?.stage === "repair-required" &&
@@ -7460,6 +7530,13 @@ export function assertRun(run) {
       throw workflowError("Plan-execution pending commit pause is invalid.");
     }
   }
+  if (
+    state.pendingCommit?.preEffectRejection?.catalog !== undefined &&
+    !Object.hasOwn(run.modelCompletionReceipts ?? {}, "worker")
+  )
+    throw workflowError(
+      "Commit catalog proof has no matching completion receipt.",
+    );
   const hashFields = [
     "task",
     "plan",

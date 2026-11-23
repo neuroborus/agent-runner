@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createInactivityCoordinator } from "../../src/runner/inactivity.js";
 import {
+  matchesObservedInactivityExpiry,
   providerInactivityFingerprint,
   RUN_STATE_SCHEMA_VERSION,
 } from "../../src/state/index.js";
@@ -13,6 +14,7 @@ import {
 // Use the real coordinator; only persistence and the clock are in memory.
 export async function attachInactivity(fixture, { onRecord } = {}) {
   const { runtime } = fixture;
+  runtime.matchesObservedInactivityExpiry = matchesObservedInactivityExpiry;
   const transition = runtime.transition.bind(runtime);
   const finish = runtime.finishAgentTurn.bind(runtime);
   await transition({

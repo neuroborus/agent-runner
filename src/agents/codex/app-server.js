@@ -1,7 +1,6 @@
 import { createInterface } from "node:readline";
 
 const MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024;
-const RETAINED_NOTIFICATIONS = new Set(["model/rerouted", "turn/completed"]);
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -11,6 +10,27 @@ function isRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+function hasDuplicateFields(source, message) {
+  // The source is valid JSON. Each colon outside a string introduces a field,
+  // and JSON.parse can only remove fields when it overwrites a duplicate.
+  let fieldCount = 0;
+  let isInString = false;
+  for (const [token] of source.matchAll(/\\.|"|:/gsu)) {
+    if (token === '"') isInString = !isInString;
+    if (token === ":" && !isInString) fieldCount += 1;
+  }
+  const containers = [message];
+  while (containers.length > 0) {
+    const container = containers.pop();
+    const values = Object.values(container);
+    if (!Array.isArray(container)) fieldCount -= values.length;
+    for (const value of values) {
+      if (value !== null && typeof value === "object") containers.push(value);
+    }
+  }
+  return fieldCount !== 0;
+}
+
 export function createCodexAppServerClient(
   child,
   AdapterError,
@@ -18,6 +38,7 @@ export function createCodexAppServerClient(
   classifyRequestError,
   progress,
   observations,
+  { trackModelReroutes = false } = {},
 ) {
   if (
     child === null ||
@@ -33,10 +54,14 @@ export function createCodexAppServerClient(
   let nextId = 0;
   let closedError;
   let closing = false;
-  let exited = false;
+  let exitOutcome;
+  let hasModelReroute = false;
+  let catalogLookupActive = false;
   const pending = new Map();
+  const catalogResponseIds = new Set();
   const notifications = [];
   const waiters = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   let resolveClosed;
   const closed = new Promise((resolvePromise) => {
     resolveClosed = resolvePromise;
@@ -90,13 +115,13 @@ export function createCodexAppServerClient(
     );
     if (waiterIndex !== -1) {
       waiters.splice(waiterIndex, 1)[0].resolve(message.params);
-    } else if (RETAINED_NOTIFICATIONS.has(message.method)) {
+    } else if (message.method === "turn/completed") {
       notifications.push(message);
     }
   }
 
-  function dispatchLine(line) {
-    if (Buffer.byteLength(line) > MAX_PROTOCOL_LINE_BYTES) {
+  function dispatchLine(encodedLine) {
+    if (encodedLine.length > MAX_PROTOCOL_LINE_BYTES) {
       rejectAll(
         new AdapterError("Codex protocol message is too large.", {
           code: "ERR_CODEX_PROTOCOL",
@@ -105,9 +130,11 @@ export function createCodexAppServerClient(
       child.kill();
       return;
     }
+    let source;
     let message;
     try {
-      message = JSON.parse(line);
+      source = decoder.decode(Buffer.from(encodedLine, "latin1"));
+      message = JSON.parse(source);
     } catch {
       // Parser diagnostics can embed the untrusted frame.
       rejectAll(
@@ -127,7 +154,40 @@ export function createCodexAppServerClient(
       child.kill();
       return;
     }
-    if (message.id !== undefined && typeof message.method === "string") {
+    const operation = pending.get(message.id);
+    const hasMethod = typeof message.method === "string";
+    const isModelReroute =
+      trackModelReroutes && message.method === "model/rerouted";
+    const hasResponsePayload =
+      Object.hasOwn(message, "result") || Object.hasOwn(message, "error");
+    const isRepeatedCatalogResponse =
+      catalogResponseIds.has(message.id) && (!hasMethod || hasResponsePayload);
+    const isUnmatchedCatalogResponse =
+      catalogLookupActive && !hasMethod && operation === undefined;
+    const invalidCatalogResponse =
+      isRepeatedCatalogResponse || isUnmatchedCatalogResponse;
+    if (
+      (isModelReroute && Object.hasOwn(message, "id")) ||
+      (hasResponsePayload && Object.hasOwn(message, "method")) ||
+      invalidCatalogResponse ||
+      ((trackModelReroutes || operation?.method === "model/list") &&
+        hasDuplicateFields(source, message))
+    ) {
+      rejectAll(
+        new AdapterError("Codex emitted an invalid protocol envelope.", {
+          code: "ERR_CODEX_PROTOCOL",
+          method: invalidCatalogResponse
+            ? "model/list"
+            : isModelReroute
+              ? "model/rerouted"
+              : operation?.method,
+        }),
+      );
+      child.kill();
+      return;
+    }
+    if (isModelReroute) hasModelReroute = true;
+    if (message.id !== undefined && hasMethod) {
       if (closing) {
         rejectAll(
           new AdapterError("Codex emitted a request during shutdown.", {
@@ -147,12 +207,19 @@ export function createCodexAppServerClient(
       return;
     }
     if (message.id !== undefined) {
-      const operation = pending.get(message.id);
       if (operation === undefined) {
         return;
       }
       pending.delete(message.id);
-      if (message.error !== undefined) {
+      if (operation.method === "model/list") catalogResponseIds.add(message.id);
+      if (message.error !== undefined && message.result !== undefined) {
+        operation.reject(
+          new AdapterError("Codex response has conflicting results.", {
+            code: "ERR_CODEX_PROTOCOL",
+            method: operation.method,
+          }),
+        );
+      } else if (message.error !== undefined) {
         operation.reject(
           classifyRequestError?.(message.error, operation.method) ??
             new AdapterError("Codex app-server request failed.", {
@@ -183,13 +250,13 @@ export function createCodexAppServerClient(
       }
       return;
     }
-    if (typeof message.method === "string") {
+    if (hasMethod) {
       dispatchNotification(message);
     }
   }
 
   function handleLine(line) {
-    if (closedError !== undefined || exited) return;
+    if (closedError !== undefined || exitOutcome !== undefined) return;
     try {
       dispatchLine(line);
     } catch {
@@ -202,22 +269,28 @@ export function createCodexAppServerClient(
     }
   }
 
-  function handleOutputError(cause) {
-    if (!closing) {
-      rejectAll(
-        new AdapterError("Cannot read from Codex app-server.", {
-          cause,
-          code: "ERR_CODEX_PROCESS_EXITED",
-        }),
-      );
-    }
+  function needsOutputDrain() {
+    return trackModelReroutes && !child.stdout.readableEnded;
   }
 
+  function rejectOutput(cause) {
+    rejectAll(
+      new AdapterError("Cannot read from Codex app-server.", {
+        cause,
+        code: "ERR_CODEX_PROCESS_EXITED",
+      }),
+    );
+  }
+
+  // Split on ASCII line endings while keeping the bytes for strict decoding.
+  child.stdout.setEncoding("latin1");
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  // readline removes its input listener on close; keep late stream errors handled.
-  child.stdout.on("error", () => {});
+  // Listen on stdout because readline removes its input listener on close.
   lines.on("line", handleLine);
-  lines.on("error", handleOutputError);
+  lines.on("error", () => {});
+  child.stdout.on("error", (cause) => {
+    if (!closing || needsOutputDrain()) rejectOutput(cause);
+  });
   child.stderr.on("error", () => {});
   child.stderr.resume();
   child.stdin.on("error", (cause) => {
@@ -238,10 +311,11 @@ export function createCodexAppServerClient(
       }),
     );
   });
-  child.once("close", () => {
+  child.once("close", (exitCode, exitSignal) => {
+    if (closing && needsOutputDrain()) rejectOutput();
     lines.close();
     signal?.removeEventListener("abort", abort);
-    exited = true;
+    exitOutcome = { type: "close", exitCode, signal: exitSignal };
     if (!closing) {
       rejectAll(
         new AdapterError("Codex app-server exited unexpectedly.", {
@@ -255,6 +329,8 @@ export function createCodexAppServerClient(
   async function request(method, params) {
     observations?.begin(method, params);
     progress?.begin(method, params);
+    // Keep validating unmatched responses between pages and while a miss settles.
+    catalogLookupActive = method === "model/list";
     const id = nextId;
     nextId += 1;
     return new Promise((resolvePromise, rejectPromise) => {
@@ -296,12 +372,8 @@ export function createCodexAppServerClient(
     });
   }
 
-  function receivedNotification(method) {
-    return notifications.some((message) => message.method === method);
-  }
-
   function waitForExit(timeout) {
-    if (exited) {
+    if (exitOutcome !== undefined) {
       return Promise.resolve(true);
     }
     return new Promise((resolvePromise) => {
@@ -318,7 +390,7 @@ export function createCodexAppServerClient(
       return closed;
     }
     closing = true;
-    if (observations === undefined) lines.close();
+    if (observations === undefined && !trackModelReroutes) lines.close();
     let streamError;
     try {
       child.stdin.end();
@@ -340,6 +412,8 @@ export function createCodexAppServerClient(
       if (closedError !== undefined) throw closedError;
       return;
     }
+    // EOF caused by termination cannot prove that pending reroutes drained.
+    if (needsOutputDrain()) rejectOutput();
     child.kill();
     if (await waitForExit(1_000)) {
       if (streamError !== undefined) {
@@ -362,10 +436,13 @@ export function createCodexAppServerClient(
 
   return Object.freeze({
     get usable() {
-      return closedError === undefined && !closing && !exited;
+      return closedError === undefined && !closing && exitOutcome === undefined;
     },
-    get exited() {
-      return exited;
+    get exitOutcome() {
+      return exitOutcome;
+    },
+    get hasModelReroute() {
+      return hasModelReroute;
     },
     selectCompaction: (threadId, turnId) =>
       observations?.selectCompaction(threadId, turnId),
@@ -373,7 +450,6 @@ export function createCodexAppServerClient(
       observations?.confirmCompaction(threadId, turnId),
     close,
     notify,
-    receivedNotification,
     request,
     waitForNotification,
   });

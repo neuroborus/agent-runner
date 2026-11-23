@@ -15,12 +15,15 @@ import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   ADAPTER_FAILURE_CLASS,
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  CATALOG_VALIDATED_MODEL,
   createAdapterContract,
   DEFAULT_CLIENT_ATTRIBUTION,
   deepFreeze,
   EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
+  MODEL_CATALOG_INVALID_DIAGNOSTIC,
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
   normalizeClientAttribution,
   sessionName,
   OUTPUT_EXHAUSTED_DISPOSITION,
@@ -127,6 +130,8 @@ const AUTHENTICATION_ERROR_CODES = new Set(["invalid_api_key"]);
 const REQUEST_ERROR_FIELDS = new Set(["code", "message", "data"]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
+  MODEL_CATALOG_INVALID_DIAGNOSTIC,
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
   OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
@@ -360,10 +365,16 @@ function codexFailureRecord(cause) {
     (typeof cause?.code === "string" && cause.code.includes("LOCAL_COMMIT"))
       ? "commit"
       : "turn";
+  const noTurnEffect =
+    cause instanceof CodexAdapterError &&
+    checkpoint === "turn" &&
+    !ambiguous &&
+    diagnosticClass === MODEL_UNAVAILABLE_DIAGNOSTIC &&
+    cause.noTurnEffect === true;
   const effect =
     ambiguous && cause?.effectStarted === false
       ? "possible"
-      : cause?.effectStarted === false
+      : cause?.effectStarted === false || noTurnEffect
         ? "none"
         : cause?.effectStarted === true
           ? "started"
@@ -418,6 +429,7 @@ export class CodexAdapterError extends Error {
       effectStarted,
       failureClass,
       method,
+      noTurnEffect = false,
       recoverable = false,
     } = {},
   ) {
@@ -427,6 +439,7 @@ export class CodexAdapterError extends Error {
     this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
+    if (noTurnEffect) this.noTurnEffect = true;
     if (availabilityReason !== undefined)
       this.availabilityReason = availabilityReason;
     if (disposition !== undefined) this.disposition = disposition;
@@ -825,11 +838,18 @@ function assertThreadResponse(value) {
   return value.thread.id;
 }
 
+function invalidModelCatalogResponse() {
+  return new CodexAdapterError("Codex model catalog response is invalid.", {
+    code: "ERR_CODEX_PROTOCOL",
+    diagnosticClass: MODEL_CATALOG_INVALID_DIAGNOSTIC,
+  });
+}
+
 async function validateModel(
   client,
   model,
   effort,
-  { allowUnlisted = false } = {},
+  { allowUnlisted = false, noTurnEffect = false, signal } = {},
 ) {
   if (model === undefined && effort === undefined) {
     return;
@@ -837,67 +857,104 @@ async function validateModel(
   const cursors = new Set();
   let cursor = null;
   for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
-    const result = await client.request("model/list", {
-      cursor,
-      includeHidden: true,
-      limit: 100,
-    });
-    if (!isRecord(result) || !Array.isArray(result.data)) {
+    let result;
+    try {
+      result = await client.request("model/list", {
+        cursor,
+        includeHidden: true,
+        limit: 100,
+      });
+    } catch (cause) {
+      if (
+        cause instanceof CodexAdapterError &&
+        cause.code === "ERR_CODEX_PROTOCOL" &&
+        (cause.method === undefined || cause.method === "model/list")
+      )
+        throw invalidModelCatalogResponse();
+      // An exit with a cursor pending leaves the lookup incomplete. Stops and
+      // ownership failures keep their own classification.
+      if (
+        page > 0 &&
+        cause instanceof CodexAdapterError &&
+        cause.code === "ERR_CODEX_PROCESS_EXITED" &&
+        cause.ownershipDiagnostic === null &&
+        signal?.aborted !== true
+      )
+        throw invalidModelCatalogResponse();
+      throw cause;
+    }
+    const isModelName = (value) =>
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.isWellFormed() &&
+      !/[\0\s]/u.test(value);
+    if (
+      !isRecord(result) ||
+      !Array.isArray(result.data) ||
+      result.data.some(
+        (entry) =>
+          !isRecord(entry) ||
+          !(isModelName(entry.id) || isModelName(entry.model)) ||
+          (entry.id !== undefined && !isModelName(entry.id)) ||
+          (entry.model !== undefined && !isModelName(entry.model)) ||
+          (entry.isDefault !== undefined &&
+            typeof entry.isDefault !== "boolean") ||
+          (entry.supportedReasoningEfforts !== undefined &&
+            (!Array.isArray(entry.supportedReasoningEfforts) ||
+              entry.supportedReasoningEfforts.some(
+                (item) => !isRecord(item) || !isModelName(item.reasoningEffort),
+              ))),
+      )
+    ) {
       throw new CodexAdapterError("Codex returned an invalid model list.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: MODEL_CATALOG_INVALID_DIAGNOSTIC,
       });
     }
-    const selected = result.data.find(
-      (entry) =>
-        isRecord(entry) &&
-        (model === undefined
-          ? entry.isDefault === true
-          : entry.id === model || entry.model === model),
+    const selected = result.data.find((entry) =>
+      model === undefined
+        ? entry.isDefault === true
+        : entry.id === model || entry.model === model,
     );
-    if (selected !== undefined) {
-      if (
-        effort !== undefined &&
-        selected.supportedReasoningEfforts !== undefined
-      ) {
-        const supported = selected.supportedReasoningEfforts;
-        if (
-          !Array.isArray(supported) ||
-          supported.some(
-            (entry) =>
-              !isRecord(entry) || typeof entry.reasoningEffort !== "string",
-          )
-        ) {
-          throw new CodexAdapterError(
-            "Codex returned invalid model capabilities.",
-            {
-              code: "ERR_CODEX_PROTOCOL",
-            },
-          );
-        }
-        if (!supported.some((entry) => entry.reasoningEffort === effort))
-          throw effortError();
-      }
-      return;
-    }
-    if (result.nextCursor === null || result.nextCursor === undefined) {
-      break;
-    }
     if (
-      typeof result.nextCursor !== "string" ||
-      result.nextCursor.length === 0 ||
-      cursors.has(result.nextCursor)
+      result.nextCursor !== null &&
+      (typeof result.nextCursor !== "string" ||
+        result.nextCursor.length === 0 ||
+        !result.nextCursor.isWellFormed() ||
+        cursors.has(result.nextCursor))
     ) {
       throw new CodexAdapterError("Codex model pagination is invalid.", {
         code: "ERR_CODEX_PROTOCOL",
+        diagnosticClass: MODEL_CATALOG_INVALID_DIAGNOSTIC,
+      });
+    }
+    if (selected !== undefined) {
+      if (
+        effort !== undefined &&
+        selected.supportedReasoningEfforts !== undefined &&
+        !selected.supportedReasoningEfforts.some(
+          (entry) => entry.reasoningEffort === effort,
+        )
+      )
+        throw effortError();
+      return selected;
+    }
+    if (result.nextCursor === null) {
+      // An undiscoverable native default is checked by the provider itself.
+      if (model === undefined || allowUnlisted) return;
+      throw new CodexAdapterError("Codex model is unavailable.", {
+        code: "ERR_CODEX_MODEL_UNAVAILABLE",
+        diagnosticClass: MODEL_UNAVAILABLE_DIAGNOSTIC,
+        noTurnEffect,
       });
     }
     cursors.add(result.nextCursor);
     cursor = result.nextCursor;
   }
-  // An undiscoverable native default must be checked by the provider itself.
   if (model === undefined || allowUnlisted) return;
-  throw new CodexAdapterError(`Codex model is unavailable: ${model}.`, {
-    code: "ERR_CODEX_MODEL_UNAVAILABLE",
+  throw new CodexAdapterError("Codex model pagination did not complete.", {
+    code: "ERR_CODEX_PROTOCOL",
+    diagnosticClass: MODEL_CATALOG_INVALID_DIAGNOSTIC,
   });
 }
 
@@ -1153,6 +1210,19 @@ function isEffortRejection(message) {
 
 function classifyRequestError(error, method, request) {
   if (
+    method === "model/list" &&
+    (!isStructuredRequestError(error) ||
+      !Number.isSafeInteger(error.code) ||
+      typeof error.message !== "string")
+  )
+    return new CodexAdapterError(
+      "Codex model catalog error response is invalid.",
+      {
+        code: "ERR_CODEX_PROTOCOL",
+        method,
+      },
+    );
+  if (
     method === "thread/name/set" &&
     isStructuredRequestError(error) &&
     Number.isSafeInteger(error.code) &&
@@ -1284,6 +1354,7 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {
   await assertCodexWorkspaceReady({ ...request, preparableOutputPaths: [] });
+  if (client.hasModelReroute) throw modelReroutedError();
   let response;
   try {
     response = await client.request(
@@ -1327,7 +1398,7 @@ async function startTurn(client, request, threadId, prompt, workspaceStorage) {
     if (
       cause instanceof CodexAdapterError &&
       cause.code === "ERR_CODEX_PROTOCOL" &&
-      cause.method === "progress"
+      (cause.method === "progress" || cause.method === "model/rerouted")
     )
       throw cause;
     throw new CodexAdapterError("Codex turn outcome is ambiguous.", {
@@ -1376,6 +1447,26 @@ async function compactThread(client, threadId) {
   }
 }
 
+function modelReroutedError() {
+  return new CodexAdapterError("Codex substituted the requested model.", {
+    code: "ERR_CODEX_MODEL_REROUTED",
+  });
+}
+
+function canRecoverWithFreshThread(cause, request) {
+  return (
+    cause instanceof CodexAdapterError &&
+    cause.recoverable &&
+    cause.availabilityReason === undefined &&
+    cause.method !== "mcp/list" &&
+    !["ERR_CODEX_USAGE_LIMIT", "ERR_CODEX_SESSION_NAMING_UNAVAILABLE"].includes(
+      cause.code,
+    ) &&
+    request.access !== "local-commit" &&
+    request.session?.mode !== "fork"
+  );
+}
+
 async function runTurn(
   client,
   request,
@@ -1401,6 +1492,7 @@ async function runTurn(
         },
       );
     }
+    if (client.hasModelReroute) throw modelReroutedError();
     await compactThread(client, threadId);
     turn = await startTurn(
       client,
@@ -1419,15 +1511,7 @@ async function runTurn(
       );
     }
   }
-  if (
-    request.model !== undefined &&
-    client.receivedNotification("model/rerouted")
-  ) {
-    throw new CodexAdapterError(
-      `Codex substituted the requested model: ${request.model}.`,
-      { code: "ERR_CODEX_MODEL_REROUTED" },
-    );
-  }
+  if (client.hasModelReroute) throw modelReroutedError();
   if (turn.status === "interrupted") {
     throw new CodexAdapterError("Codex turn was interrupted.", {
       ambiguous: true,
@@ -1701,7 +1785,7 @@ function normalizeResult(turn, request, sessionId) {
       },
     );
   }
-  return Object.freeze({ output, structured, sessionId });
+  return { output, structured, sessionId };
 }
 
 export function createCodexAdapter(options = {}) {
@@ -2173,9 +2257,11 @@ export function createCodexAdapter(options = {}) {
         (error, method) => classifyRequestError(error, method, request),
         progress,
         observations,
+        { trackModelReroutes: request.model !== undefined },
       );
       let result;
       let operationFailed = false;
+      let operationFailure;
       try {
         const protocolOperation = (async () => {
           await client.request("initialize", {
@@ -2203,18 +2289,29 @@ export function createCodexAdapter(options = {}) {
             attemptRequest.directoryPermissions,
             CodexAdapterError,
           );
-          if (request.model !== undefined)
-            await validateModel(client, request.model, request.effort);
+          const selectedModel =
+            request.model === undefined
+              ? undefined
+              : await validateModel(client, request.model, request.effort, {
+                  noTurnEffect: !recovery,
+                  signal: request.signal,
+                });
           const selectedThread = await selectThread(
             client,
             attemptRequest,
             fresh,
           );
           const threadId = selectedThread.id;
-          if (fresh || request.session?.mode !== "continue") {
-            await request.onSessionCreated?.(threadId);
-            await nameCreatedThread(client, request, threadId);
-          }
+          const isNewThread = fresh || request.session?.mode !== "continue";
+          if (isNewThread) await request.onSessionCreated?.(threadId);
+          if (
+            selectedModel !== undefined &&
+            selectedThread.model !== undefined &&
+            selectedThread.model !== selectedModel.id &&
+            selectedThread.model !== selectedModel.model
+          )
+            throw modelReroutedError();
+          if (isNewThread) await nameCreatedThread(client, request, threadId);
           if (request.model === undefined && request.effort !== undefined) {
             const model =
               selectedThread.model ?? configuration.config.model ?? undefined;
@@ -2245,20 +2342,44 @@ export function createCodexAdapter(options = {}) {
           : Promise.race([protocolOperation, ownedFailureSignal]));
       } catch (cause) {
         operationFailed = true;
+        operationFailure = cause;
         throw cause;
       } finally {
+        const catalogMiss =
+          operationFailure instanceof CodexAdapterError &&
+          operationFailure.diagnosticClass === MODEL_UNAVAILABLE_DIAGNOSTIC;
+        const canRecover = () =>
+          !request.signal?.aborted &&
+          canRecoverWithFreshThread(operationFailure, request);
+        let transportSettled = false;
         try {
           await client.close({
             retainProcess: child.ownedContainmentRetained === true,
           });
+          transportSettled = true;
         } catch (cause) {
-          if (!operationFailed) {
+          const protocolFailed =
+            cause instanceof CodexAdapterError &&
+            cause.code === "ERR_CODEX_PROTOCOL";
+          // Catalog absence is provisional until App Server output settles.
+          // Explicit-model recovery needs the same proof that output drained.
+          if (
+            !operationFailed ||
+            catalogMiss ||
+            ((request.model !== undefined ||
+              (protocolFailed && cause.method === "model/list")) &&
+              canRecover())
+          ) {
             operationFailed = true;
+            if (catalogMiss) throw invalidModelCatalogResponse();
             throw cause;
           }
         } finally {
-          await ownedCompletion;
-          if (client.exited && child.ownedContainmentRetained !== true) {
+          const supervision = await ownedCompletion;
+          if (
+            client.exitOutcome !== undefined &&
+            child.ownedContainmentRetained !== true
+          ) {
             processRetired = true;
             try {
               progress.retire();
@@ -2280,11 +2401,47 @@ export function createCodexAdapter(options = {}) {
                 },
               );
           }
+          if (
+            transportSettled &&
+            request.model !== undefined &&
+            (!operationFailed || catalogMiss || canRecover())
+          ) {
+            const outcome =
+              ownedCompletion === undefined
+                ? client.exitOutcome
+                : supervision?.outcome;
+            if (
+              !processRetired ||
+              outcome?.type !== "close" ||
+              outcome.exitCode !== 0 ||
+              outcome.signal !== null
+            ) {
+              // An unsettled miss keeps a terminal catalog diagnosis.
+              if (catalogMiss) throw invalidModelCatalogResponse();
+              throw new CodexAdapterError(
+                "Codex app-server did not exit successfully.",
+                { code: "ERR_CODEX_PROCESS_EXITED" },
+              );
+            }
+          }
+        }
+        if (
+          client.hasModelReroute &&
+          (!operationFailed || !request.signal?.aborted)
+        ) {
+          if (catalogMiss) throw invalidModelCatalogResponse();
+          if (!operationFailed || canRecover()) throw modelReroutedError();
         }
       }
       return result;
     } catch (cause) {
       attemptFailed = true;
+      if (
+        cause instanceof CodexAdapterError &&
+        cause.code === "ERR_CODEX_PROTOCOL" &&
+        cause.method === "model/list"
+      )
+        throw invalidModelCatalogResponse();
       throw cause;
     } finally {
       await cleanupWorkspaceStorage(workspaceStorage);
@@ -2350,6 +2507,17 @@ export function createCodexAdapter(options = {}) {
     } catch (cause) {
       if (request.signal?.aborted) {
         if (request.access === "local-commit") {
+          // Stop settlement still needs a diagnosed terminal model rejection.
+          if (
+            cause instanceof CodexAdapterError &&
+            [
+              MODEL_CATALOG_INVALID_DIAGNOSTIC,
+              EFFORT_DIAGNOSTIC_CLASS,
+            ].includes(cause.diagnosticClass)
+          ) {
+            cause.setEffectStarted(false);
+            throw cause;
+          }
           throw new CodexAdapterError(
             "Local commit stopped before execution.",
             {
@@ -2363,16 +2531,6 @@ export function createCodexAdapter(options = {}) {
       }
       request.signal?.throwIfAborted();
       if (
-        cause instanceof CodexAdapterError &&
-        cause.recoverable &&
-        cause.method === "mcp/list"
-      ) {
-        if (request.access === "local-commit") {
-          cause.setEffectStarted(false);
-        }
-        throw cause;
-      }
-      if (
         request.access === "local-commit" &&
         cause instanceof CodexAdapterError
       ) {
@@ -2380,20 +2538,8 @@ export function createCodexAdapter(options = {}) {
         throw cause;
       }
       if (
-        cause instanceof CodexAdapterError &&
-        [
-          "ERR_CODEX_USAGE_LIMIT",
-          "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
-        ].includes(cause.code)
-      ) {
-        throw cause;
-      }
-      if (
-        cause instanceof CodexAdapterError &&
-        cause.recoverable &&
-        cause.availabilityReason === undefined &&
-        (directoryBoundary === undefined || settlement.directoryVerified) &&
-        request.session?.mode !== "fork"
+        canRecoverWithFreshThread(cause, request) &&
+        (directoryBoundary === undefined || settlement.directoryVerified)
       ) {
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
@@ -2408,7 +2554,11 @@ export function createCodexAdapter(options = {}) {
     if (request.access === "local-commit") {
       await createAuthorizedCommit(request);
     }
-    return result;
+    if (request.model !== undefined)
+      Object.defineProperty(result, CATALOG_VALIDATED_MODEL, {
+        value: request.model,
+      });
+    return Object.freeze(result);
   }
 
   return Object.freeze({

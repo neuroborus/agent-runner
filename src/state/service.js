@@ -26,6 +26,8 @@ import {
   availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
+  isRestatementReplacingActiveTurn,
+  matchesObservedAvailabilityRetirement,
 } from "./availability.js";
 import {
   atomicWriteFile,
@@ -38,6 +40,14 @@ import {
   providerInactivityFingerprint,
   inactivityActivity,
 } from "./inactivity.js";
+import {
+  hasCompletedModelAttempt,
+  matchesCatalogResumeTransition,
+  modelCompletionFingerprint,
+  nextCatalogResume,
+  readOnlyCatalogAttempt,
+  writableCatalogAttempt,
+} from "./model-completion.js";
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
@@ -283,6 +293,10 @@ export function createRunStore({
   onPreparationBoundary = async () => {},
   onRuntimeBoundary = async () => {},
   resolveStopBoundary = null,
+  matchesCatalogReservation = null,
+  assertCatalogTransition = null,
+  matchesAvailabilityRetirement = null,
+  readRestatementStart = null,
   ownerProbeIntervalMs = 1000,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
@@ -293,6 +307,14 @@ export function createRunStore({
   if (
     (resolveStopBoundary !== null &&
       typeof resolveStopBoundary !== "function") ||
+    (matchesCatalogReservation !== null &&
+      typeof matchesCatalogReservation !== "function") ||
+    (assertCatalogTransition !== null &&
+      typeof assertCatalogTransition !== "function") ||
+    (matchesAvailabilityRetirement !== null &&
+      typeof matchesAvailabilityRetirement !== "function") ||
+    (readRestatementStart !== null &&
+      typeof readRestatementStart !== "function") ||
     typeof clock !== "function" ||
     typeof runIdFactory !== "function" ||
     typeof leaseTokenFactory !== "function" ||
@@ -352,6 +374,10 @@ export function createRunStore({
   const journal = createStateJournal({
     onTransitionBoundary,
     resolveStopBoundary,
+    matchesCatalogReservation,
+    assertCatalogTransition,
+    matchesAvailabilityRetirement,
+    readRestatementStart,
   });
   const mutate = createMutationBoundary({
     hostName,
@@ -731,6 +757,7 @@ export function createRunStore({
           ),
           inactivityRecovery: null,
           observations: null,
+          modelCompletionReceipts: {},
           availabilityRetry: null,
           providerPolicies:
             input.providerPolicies === undefined
@@ -902,6 +929,10 @@ export function createRunStore({
   async function loadRunHistory(runId, { stream = false } = {}) {
     const runDirectory = await getRunDirectory(runId);
     const snapshot = await loadSnapshot(runDirectory, runId);
+    const readOnlyAttempt = readOnlyCatalogAttempt(
+      snapshot.state,
+      snapshot.activeTurnStart,
+    );
     const events = {
       async *[Symbol.asyncIterator]() {
         for await (const event of journal.replaySnapshot(
@@ -914,6 +945,19 @@ export function createRunStore({
     return deepFreeze({
       run: snapshot.state,
       events: stream ? events : await Array.fromAsync(events),
+      hasWritableCatalogRejection:
+        writableCatalogAttempt(snapshot.state, snapshot.activeTurnStart) !==
+        null,
+      readOnlyCatalogRejection:
+        readOnlyAttempt !== null &&
+        readOnlyAttempt.id ===
+          snapshot.stopProof?.checkpoint.readOnlyRejectionAttemptId &&
+        Object.hasOwn(
+          snapshot.state.modelCompletionReceipts,
+          readOnlyAttempt.role,
+        )
+          ? { attempt: readOnlyAttempt, turnStart: snapshot.activeTurnStart }
+          : null,
     });
   }
 
@@ -1299,6 +1343,10 @@ export function createRunStore({
       resultBytes,
       structuredResultBytes,
       ownershipDiagnostic,
+      writableRejection,
+      writableRetryEligible,
+      readOnlyRejection,
+      commitRejection,
     } = {},
   ) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
@@ -1311,7 +1359,15 @@ export function createRunStore({
         records,
         status,
         incomplete,
-        { resultBytes, structuredResultBytes, ownershipDiagnostic },
+        {
+          resultBytes,
+          structuredResultBytes,
+          ownershipDiagnostic,
+          writableRejection,
+          writableRetryEligible,
+          readOnlyRejection,
+          commitRejection,
+        },
       );
       return persistObservations(
         runDirectory,
@@ -1484,7 +1540,14 @@ export function createRunStore({
   async function transitionRun(
     lease,
     patch,
-    { activity, expectedRevision } = {},
+    {
+      activity,
+      expectedRevision,
+      catalogCheckpoint,
+      writableCatalogRejection,
+      commitCatalogRejection,
+    } = {},
+    { preparePipelineState, validate } = {},
   ) {
     if (
       expectedRevision !== undefined &&
@@ -1530,21 +1593,59 @@ export function createRunStore({
           { code: "ERR_EMPTY_RUN_TRANSITION" },
         );
       }
+      const current = snapshot.state;
+      const next = { ...current, ...normalizedPatch };
+      // A permitted deferred stop can advance the turn's journal predecessor.
+      if (preparePipelineState !== undefined)
+        next.pipelineState = preparePipelineState(
+          next.pipelineState,
+          current.revision,
+        );
+      if (
+        isRestatementReplacingActiveTurn(
+          current,
+          next,
+          normalizedActivity,
+          readRestatementStart,
+        )
+      )
+        throw new RunStoreError(
+          "Retire the active agent turn before starting a restatement.",
+          { code: "ERR_INVALID_AGENT_TURN" },
+        );
+      const retainedBinding = nextCatalogResume(current, next);
+      if (
+        !matchesCatalogResumeTransition(
+          current,
+          next,
+          retainedBinding,
+          { activity: normalizedActivity, catalogCheckpoint },
+          matchesCatalogReservation,
+        )
+      )
+        throw new RunStoreError(
+          "Model catalog retry changed its frozen checkpoint.",
+          {
+            code: "ERR_MODEL_CATALOG_CHECKPOINT_CHANGED",
+          },
+        );
       const nextState = normalizeRunState(
         {
-          ...snapshot.state,
-          ...normalizedPatch,
+          ...next,
+          modelCatalogResume: retainedBinding,
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),
         },
         record.runId,
       );
       assertStopProgress(snapshot.state, nextState, resolveStopBoundary);
+      validate?.(deepFreeze(nextState));
       await journal.appendTransition(
         runDirectory,
         nextState,
         snapshot,
         normalizedActivity,
+        { catalogCheckpoint, writableCatalogRejection, commitCatalogRejection },
       );
       return deepFreeze(nextState);
     });
@@ -1553,7 +1654,7 @@ export function createRunStore({
   async function scheduleAvailabilityRetry(
     lease,
     input,
-    { pipelineState } = {},
+    { pipelineState, reconciledTurn } = {},
   ) {
     if (!isRecord(input)) {
       throw new RunStoreError("Availability retry input is invalid.", {
@@ -1582,7 +1683,10 @@ export function createRunStore({
       }
       if (
         state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
-        state.activeTurn !== null ||
+        (reconciledTurn === undefined
+          ? state.activeTurn !== null
+          : reconciledTurn?.role !== input.role ||
+            !isDeepStrictEqual(state.activeTurn, reconciledTurn)) ||
         state.preparation != null ||
         state.executionProcess !== null ||
         state.executionResource !== null
@@ -1603,6 +1707,7 @@ export function createRunStore({
         {
           ...state,
           ...(pipelineState === undefined ? {} : { pipelineState }),
+          ...(reconciledTurn === undefined ? {} : { activeTurn: null }),
           revision: state.revision + 1,
           updatedAt: scheduledAt,
           availabilityRetry: {
@@ -1622,6 +1727,20 @@ export function createRunStore({
         },
         record.runId,
       );
+      if (
+        reconciledTurn !== undefined &&
+        !matchesObservedAvailabilityRetirement(
+          state,
+          nextState,
+          matchesAvailabilityRetirement,
+          snapshot.activeTurnStart,
+        )
+      ) {
+        throw new RunStoreError(
+          "Availability scheduling does not own a reconciled read-only restatement.",
+          { code: "ERR_INVALID_RUN_STATE" },
+        );
+      }
       await journal.appendTransition(
         runDirectory,
         nextState,
@@ -1761,6 +1880,50 @@ export function createRunStore({
     });
   }
 
+  async function recordModelCompletion(lease, role, preferences) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const state = snapshot.state;
+      const configuration = state.roles[role];
+      const receipt = modelCompletionFingerprint(role, configuration);
+      if (
+        receipt === null ||
+        !hasCompletedModelAttempt(state, role, snapshot.activeTurnStart) ||
+        ["profile", "model", "effort"].some(
+          (field) => (preferences[field] ?? "current") !== configuration[field],
+        )
+      )
+        throw new RunStoreError(
+          "Model completion does not match the retired role turn.",
+          {
+            code: "ERR_INVALID_AGENT_TURN",
+          },
+        );
+      if (Object.hasOwn(state.modelCompletionReceipts, role))
+        return deepFreeze(state);
+      assertRunCanAdvance(state, resolveStopBoundary);
+      const next = normalizeRunState(
+        {
+          ...state,
+          modelCompletionReceipts: {
+            ...state.modelCompletionReceipts,
+            [role]: receipt,
+          },
+          revision: state.revision + 1,
+          updatedAt: timestamp(state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(runDirectory, next, snapshot, {
+        actor: "runner",
+        phase: "runtime",
+        kind: "model-completion-recorded",
+        message: "Recorded a completed explicit-model turn.",
+      });
+      return deepFreeze(next);
+    });
+  }
+
   async function recordProviderPolicy(lease, role, receipt) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
@@ -1890,7 +2053,13 @@ export function createRunStore({
   async function startAgentTurn(
     lease,
     activeTurn,
-    { activity, pipelineState } = {},
+    {
+      activity,
+      pipelineState,
+      preparePipelineState,
+      catalogCheckpoint,
+      validate,
+    } = {},
   ) {
     const normalizedPatch = normalizeTransitionPatch({
       activeTurn,
@@ -1907,9 +2076,12 @@ export function createRunStore({
         code: "ERR_INVALID_AGENT_TURN",
       });
     }
-    return transitionRun(lease, normalizedPatch, {
-      activity: normalizedActivity,
-    });
+    return transitionRun(
+      lease,
+      normalizedPatch,
+      { activity: normalizedActivity, catalogCheckpoint },
+      { preparePipelineState, validate },
+    );
   }
 
   async function finishAgentTurn(lease, activeTurn) {
@@ -2391,6 +2563,7 @@ export function createRunStore({
     readPublicActivity,
     readAction: actions.read,
     recordChildSession,
+    recordModelCompletion,
     recordProviderPolicy,
     recordSessionNaming,
     scheduleAvailabilityRetry,

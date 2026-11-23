@@ -61,7 +61,12 @@ Reconciliation atomically publishes the inspected candidate, approval
 invalidation and any fix charge before retiring the writable turn. Only
 allowlisted normalization diagnostics are retained, never rejected output.
 Unstarted prepared reservations resume under their existing authority after
-unchanged-state checks; published invocations require result restatement.
+unchanged-state checks. A published initial `IMPLEMENT` checkpoint may resume
+explicitly at the same reservation only after durable catalog-miss proof that
+the Worker never started and reconciliation verifies unchanged content and
+controls; resume still rechecks the frozen step and repository. Other published
+invocations may have performed writable work and require reconciliation and
+read-only result restatement when safe.
 Legacy writable continuations bind their reconciled baseline and retained fix
 accounting before checkpoint creation, preserving original implementation proof.
 Validated product decisions remain journaled settlement intents until the
@@ -91,8 +96,11 @@ invocation; unavailable uncharged budget instead requires the existing
 `extra-fix-rounds` grant. Schema-2 checkpoints carry consumed restatement
 allowances and pending fix accounting forward; bounded historical work reports
 link predecessor checkpoints and retain uncertainty independently of native
-sessions. Published invocations require reconciliation, retirement and read-only
-recovery; only proven unstarted reservations are reusable. Migration upgrades
+sessions. Published `UNFINISHED` finding-repair invocations, like other
+published invocations that may have performed writable work, require
+reconciliation, retirement and read-only restatement when safe; only proven
+unstarted reservations and the initial `IMPLEMENT` catalog-miss exception above
+are reusable. Migration upgrades
 legacy checkpoints without granting writes or renewing budgets. Original blockers,
 frozen authority and every mode-specific gate remain binding.
 The [unfinished repair continuation](../../../pipelines/plan-execution/docs/recovery.md#unfinished-repair-continuation)

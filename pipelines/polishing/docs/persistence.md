@@ -176,6 +176,9 @@ read-only correction, acceptance clears it, and a repeated invalid result is
 terminal. When validation migration requires arbitration, its accepted bounded
 disagreement is persisted before the Arbiter turn, resumed directly after an
 interruption, and cleared atomically with successful migration completion.
+A catalog retry resumes the saved validation-migration role and workflow phase
+with the same disagreement and correction allowance. Resume acceptance
+retains this binding through owner loss before dispatch.
 
 Pipeline state version 5 adds the durable `HANDOFF` boundary and makes every
 ordinary polishing Worker turn content-only. Its version-4 migration preserves
@@ -274,6 +277,20 @@ Pipeline state version 25 upgrades version-24 resolution checkpoints to schema 2
 with a null repair predecessor and a current facts binding. Blocked/exhausted
 positions, original blockers, consumption and accounting remain unchanged; migration
 grants no repair authorization, infers no historical disposition and replays no effect.
+New read-only restatement starts record the preceding revision on that same
+checkpoint. Older checkpoints can omit it. An availability schedule or
+watchdog expiry must follow that revision and match the checkpoint's content
+and provider binding to authorize another invocation, live or after restart.
+For a legacy checkpoint without the marker, the certified journal must show
+the matching restatement start with no later invocation. Compare schema-1
+corrections using the version-24 migration and each event's saved facts so a
+simultaneous envelope and pipeline migration preserves valid evidence. Backoff
+also requires retirement before scheduling and keeps the saved attempt and
+deadline. A watchdog expiry requires the matching active provider attempt at
+the expiry event and keeps the existing reconstruction allowance on cold
+resume and operator-stop settlement.
+If Runner journals a reconstruction for that expiry before losing its owner,
+recovery uses the saved authorization only until the bound read-only turn starts.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the

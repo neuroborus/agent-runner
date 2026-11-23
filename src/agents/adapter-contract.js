@@ -66,6 +66,10 @@ const EFFORT_VALUES = new Set([
   "max",
 ]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
+export const MODEL_CATALOG_INVALID_DIAGNOSTIC = "model_catalog_invalid";
+export const MODEL_UNAVAILABLE_DIAGNOSTIC = "model_unavailable";
+export const CATALOG_VALIDATED_MODEL = Symbol("catalog-validated model");
+
 export const ADAPTER_FAILURE_CLASS = "adapter_failure";
 export const LAUNCH_CHECKPOINTS = Object.freeze([
   "probe",

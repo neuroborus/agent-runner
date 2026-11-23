@@ -2237,7 +2237,15 @@ async function createFixture(
     async settleVerifiedCommit(patch, options) {
       return this.transition(patch, options);
     },
-    async startAgentTurn(activeTurn, { pipelineState } = {}) {
+    async startAgentTurn(
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? currentRun.pipelineState,
+          currentRun.revision,
+        ) ?? pipelineState;
       currentRun = {
         ...currentRun,
         ...(pipelineState === undefined ? {} : { pipelineState }),

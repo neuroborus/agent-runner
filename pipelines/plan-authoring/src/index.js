@@ -8,8 +8,10 @@ import {
   WORKFLOW_STATES,
 } from "./workflow.js";
 import {
+  assertCatalogTransition,
   assertRun as validateRun,
   isOutputDiagnostic,
+  matchesCatalogReservation,
   resolveActiveRoles,
 } from "./workflow-contract.js";
 import {
@@ -376,6 +378,8 @@ export function migratePlanAuthoringStateV6(run) {
 
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
+  assertCatalogTransition,
+  matchesCatalogReservation,
   stateVersion: 9,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,

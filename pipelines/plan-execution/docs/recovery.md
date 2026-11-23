@@ -78,7 +78,9 @@ A still-prepared reservation with no published active turn proves invocation
 never began. After unchanged-input, content and authority checks, resume uses
 that same original reservation without consuming result-correction allowance.
 Once invocation is published, recovery cannot infer that native work was absent
-and uses read-only restatement. Legacy interrupted writable turns retain their
+and uses read-only restatement. The only exception is the initial `IMPLEMENT`
+reservation after a durable [catalog miss](#explicit-model-catalog-recovery)
+proves that the Worker never started. Legacy interrupted writable turns retain their
 existing continuation contract: persist the safely reconciled baseline and any
 pending fix charge before creating a new result checkpoint, keeping the original
 step-start implementation evidence and blocker ownership unchanged.
@@ -87,9 +89,11 @@ Normalization failures and the established provider `structured-output` class
 receive one automatically authorized read-only Worker result restatement, using
 the recovery schema, inspected candidate and saved turn facts. Pending recovery
 precedes ordinary dispatch, refinement and another writable turn. It never
-replays implementation or resolution. The dedicated prompt prohibits repair,
-validation execution and invented finding dispositions. Fresh reconstruction
-uses no new source-session fork; lazy source-fork accounting remains consumed.
+replays implementation or resolution. Runner retires the earlier invocation
+before recording a start that can prove read-only restatement. The dedicated
+prompt prohibits repair, validation execution and invented finding dispositions.
+Fresh reconstruction uses no new source-session fork; lazy source-fork
+accounting remains consumed.
 Inputs, native read-only policy, filesystem authority, original blockers,
 initial implementation evidence, custom output/accepted-result bindings and
 unchanged candidate fingerprints are rechecked. A valid completion enters the
@@ -107,11 +111,11 @@ bounded; unknown diagnostic identities become `result`/`semantic-contract`.
 Rejected values, IDs, commands, exception messages, prompts, native output and
 provider-private storage are never diagnostic sources.
 
-An exhausted restatement publishes the exact
+A provider `output_exhausted` pause during restatement publishes the exact
 `writable-result:read-only:commit:<step>` checkpoint, bound to Worker, its
 original `IMPLEMENT` or `RESOLVE_FINDINGS` resume phase and the consumed attempt.
-Reconstruction retains that allowance consumption; it cannot reinterpret the
-checkpoint as writable work or another step's retry.
+Null resume continues the same read-only attempt with its consumed allowances.
+The continuation remains ready until the matching read-only turn starts.
 
 `agent-run resume --run <run-id>` (MCP null-action resume at the inspected
 revision) explicitly authorizes exactly one additional read-only restatement of
@@ -334,3 +338,104 @@ pre-executor proof and Git verification; the constrained executor and runner-own
 handoff are excluded. Ambiguous effects retain precedence. CLI/MCP publish the
 same bounded expiry/reconstruction/recovery activity and status; a client
 disconnect changes observation only.
+
+## Explicit-model catalog recovery
+
+The common [catalog recovery contract](../../../docs/ARCHITECTURE.md#explicit-model-catalog-recovery)
+applies after configuration, policy and stop checks. A qualifying miss pauses
+as `backend_unavailable` with `ERR_MODEL_CATALOG_RETRY` at the bound role and
+checkpoint. Explicit resume retries the frozen selection without automatic
+backoff, adapter fallback or source refork. [COMMIT](commit.md#commit) and
+[operator-stop](operator-stops.md#operator-pause-and-cancellation) settlement
+and [state version 46](persistence.md#statejson) have their own owners.
+
+For a qualifying catalog miss, the original initial `IMPLEMENT` reservation
+returns to prepared only after Runner proves unchanged workspace and controls.
+One event records that verification, retires the active Worker invocation,
+and publishes the pause with the original reservation and accounting.
+Live publication and journal replay require the matching invoking reservation
+and verification event. The same event must match the no-effect catalog
+rejection recorded on the failed provider attempt for that invocation. This
+attempt binding also applies to other writable catalog pauses and, with the
+read-only rejection, to candidate review, clean confirmation and terminal
+confirmation pauses of the same phase, which also keep their frozen inputs,
+reservation, any captured infrastructure fingerprint, review history and
+custom criterion results. An earlier completion receipt alone grants no retry.
+Explicit resume rechecks the frozen step and starts the same writable reservation.
+Workspace drift during any proven no-effect lookup pauses with the original
+baseline and reservation intact on cold resume and during operator stop
+settlement, including a first-use miss without a completion receipt.
+Prior possible work instead settles into the read-only result restatement with
+reconciled changes, once-only charging, and invalidated dependent evidence.
+If a continued finding repair has already spent its restatement allowance,
+Runner reconciles the repair and pauses with `writable_output_invalid`.
+An explicit resume authorizes one more read-only attempt under the same
+blockers and counters.
+An inactivity expiry journaled during the lookup also retains the read-only
+recovery path and its provider episode. On catalog resume a fresh-session
+request can use the remaining reconstruction under the same read-only
+reservation after the adapter retires its native work.
+
+A miss that proves the restatement never invoked suspends its already-consumed
+attempt. Resume uses that attempt and the original recovery episode, if one exists.
+Admission and journal replay require the exact active turn's failed attempt
+to record its read-only no-effect catalog rejection. The first pause and
+subsequent resume and dispatch preserve the frozen inputs, reconciled candidate,
+planned step, reservation and spent counters.
+The first read-only turn start for each restatement attempt records validation
+scope from the reconciled candidate, including any authorized changes made by
+the original invocation. Provider recovery keeps this scope on the same consumed
+attempt across Runner restart. The workflow rechecks it before publishing a
+continuation, after publishing turn start and before accepting the result.
+Scope drift pauses the run and preserves the reservation and spent
+counters. The established validation fingerprint remains available for
+validation-change review. A cancellation that wins before settlement retires
+the restatement and preserves its rejection and accounting without publishing
+a retry.
+Authentication, availability backoff and proven inactivity preserve the same
+read-only attempt and its spent allowances. Authentication retires superseded
+availability backoff. Turn retirement shares a journal transition with the
+next availability schedule or inactivity continuation. An atomic backoff
+requires the active read-only restatement's recorded start, consumed
+reservation, reconciled content, and a failed provider attempt recorded after
+that start at the backoff's checkpoint. Turn start binds the invocation to its
+journal predecessor, including a deferred stop accepted during preparation.
+A restarted Runner can settle a watchdog expiry published before retirement
+when it is newer than the restatement's invocation boundary and bound to the
+reconciled candidate and the provider checkpoint recorded for that attempt.
+This can be the original reservation's retained episode when selected for
+dispatch.
+If a legacy checkpoint lacks the invocation marker, certified history must
+tie the latest read-only start and its active provider attempt to that expiry
+and the unchanged reservation and candidate. Retirement records the recovered
+boundary with the continuation so another restart retains the same allowance.
+An automatic restart of an interrupted restatement requires its matching expiry.
+Authentication, output exhaustion
+and backoff resume with their existing allowances. Repeated inactivity pauses
+for explicit retry of that continuation. A lost invocation without continuation
+evidence exhausts the attempt. An unconfirmed model completion
+receipt leaves the original turn for interruption reconciliation and read-only
+restatement of any completed writes.
+
+A candidate-review catalog retry preserves the selected candidate-review step,
+frozen input hashes, finalization guidance, and any pending correction scope.
+Admission and replay preserve spent counters and the configured and additional
+fix rounds from resume acceptance through the matching turn start. The pause
+records the live candidate-review infrastructure fingerprint even on initial
+review. The retry checks it before dispatch and through result settlement,
+including after interruption. Drift pauses with any pending correction intact.
+A `CHECK_AND_FIX` catalog retry preserves the frozen input hashes, selected
+step, candidate, pending correction and fix-round accounting from the first
+pause through the matching turn start.
+A writable `FINALIZE` catalog retry also preserves the frozen input hashes,
+validation inventory, correction scope, spent rounds and authorized limit
+from the first pause through acceptance and dispatch.
+In lazy and combined modes, a candidate `CLEAN_CONFIRM` catalog pause
+records the inspected infrastructure even on the initial turn. The retry
+verifies it before dispatch and through settlement. Drift pauses without
+accepting the result or consuming a pending correction.
+Successful combined-mode clean confirmation retires the Worker retry
+scope before independent candidate review inspects its own scope.
+A catalog retry at `CONFIRM` preserves frozen inputs, finalization evidence,
+and the correction allowance through turn start. Scope drift before dispatch
+clears terminal evidence and pauses with `unsafe_git_state`.

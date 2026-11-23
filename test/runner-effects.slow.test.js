@@ -16,6 +16,7 @@ import {
   createClarificationService,
   createGitService,
   createMcpControlPlane,
+  createRunner,
   createRunStore,
   main,
 } from "../src/index.js";
@@ -36,6 +37,7 @@ import {
 import {
   appendReadFailure,
   clarificationAppendFixture,
+  configurationLoader,
   createArbiterAdapter,
   createExecutionAdapter,
   createFixture,
@@ -47,6 +49,424 @@ import {
   RUNNER_CONFIGURATION,
   transcriptHash,
 } from "./support/index.js";
+
+import { availabilityFailure } from "./support/availability.js";
+import {
+  modelCatalogMiss,
+  withModelCompletion,
+} from "./support/model-catalog.js";
+import { outputExhaustion } from "./support/output-exhaustion.js";
+
+test("configuration drift after a proven no-effect miss preserves writable reservations", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const implementing = pipelineId === "plan-execution";
+    const fixture = await operatorFixture(t, pipelineId);
+    const configurationDirectory = join(fixture.projectPath, "LOCAL_ARTIFACTS");
+    const configurationPath = join(configurationDirectory, "agent-runner.json");
+    await mkdir(configurationDirectory);
+    await writeFile(configurationPath, '{"schemaVersion":1}\n');
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const git = createGitService();
+    const adapter = createExecutionAdapter();
+    let configuredPathAvailable = true;
+    let before;
+    let runId;
+    const runner = runnerFor(
+      fixture,
+      {
+        codex: {
+          ...adapter,
+          async run(request) {
+            if (
+              request.access === "workspace-write" &&
+              request.prompt.includes(
+                implementing
+                  ? "Implement the changes described"
+                  : "Resolve every current blocker",
+              )
+            ) {
+              before = await store.loadRun(runId);
+              assert.ok(before.modelCompletionReceipts.worker);
+              await writeFile(join(request.cwd, "concurrent.txt"), "drift\n");
+              configuredPathAvailable = false;
+              throw modelCatalogMiss(request);
+            }
+            const response = await adapter.run(request);
+            if (
+              !implementing &&
+              request.prompt.includes("semantic candidate")
+            ) {
+              return {
+                ...response,
+                structured: {
+                  ...response.structured,
+                  status: "FINDINGS",
+                  findings: [
+                    {
+                      id: "R1",
+                      file: "source.js",
+                      problem: "The candidate needs a repair.",
+                      reason: "The repair is required by the task.",
+                      suggestedAction: "Add the repair.",
+                    },
+                  ],
+                },
+              };
+            }
+            return withModelCompletion(response, request);
+          },
+        },
+      },
+      {
+        git: {
+          ...git,
+          async inspectPath(input) {
+            const inspected = await git.inspectPath(input);
+            return input.path === configurationPath && !configuredPathAvailable
+              ? { ...inspected, exists: false }
+              : inspected;
+          },
+        },
+        runStore: store,
+      },
+    );
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "test-model" } },
+    });
+    runId = created.runId;
+    const { run: paused } = await runner.resume({ runId });
+    assert.ok(before, pipelineId);
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(paused.pause, {
+      reason: "project_configuration_changed",
+      code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+    });
+    assert.equal(paused.activeTurn, null);
+    assert.equal(paused.modelCatalogResume, null);
+    const field = implementing ? "writableResult" : "resolutionCorrection";
+    assert.equal(before.pipelineState[field].stage, "invoking");
+    for (const key of [field, "repositoryBaseline", "findings"]) {
+      assert.deepEqual(paused.pipelineState[key], before.pipelineState[key]);
+    }
+    assert.deepEqual(paused.counters, before.counters);
+  }
+});
+
+test("catalog resume retains narrative availability through the rebuilt prerequisite", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  let now = Date.parse("2026-09-29T10:00:00.000Z");
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    clock: () => new Date(now),
+  });
+  const adapter = createExecutionAdapter();
+  const runRole = adapter.run.bind(adapter);
+  let reviews = 0;
+  let runId;
+  let retriedEpisode;
+  adapter.run = async (request) => {
+    if (request.prompt.startsWith("Validate the proposed context")) {
+      reviews++;
+      assert.ok(reviews <= 4, "The fourth narrative attempt must pause.");
+      if (reviews === 2) throw modelCatalogMiss(request);
+      if (reviews === 4) {
+        retriedEpisode = (await store.loadRun(runId)).availabilityRetry;
+        throw outputExhaustion();
+      }
+      throw availabilityFailure();
+    }
+    return withModelCompletion(await runRole(request), request);
+  };
+  const runner = () =>
+    createRunner({
+      adapters: { codex: adapter },
+      clarifications: createClarificationService({ interactive: false }),
+      loadConfiguration: configurationLoader(),
+      runStore: store,
+      availabilityClock: () => now,
+      availabilityWait: async (delay) => {
+        now += delay;
+      },
+    });
+  const { run: paused } = await runner().run({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: { worker: { model: "worker-model" } },
+  });
+  assert.equal(paused.pause.code, "ERR_MODEL_CATALOG_RETRY");
+  assert.equal(paused.availabilityRetry.attempt, 1);
+  runId = paused.runId;
+  const { run: exhausted } = await runner().resume({ runId });
+  assert.equal(exhausted.pause.reason, "output_exhausted");
+  assert.equal(reviews, 4);
+  assert.equal(retriedEpisode.id, paused.availabilityRetry.id);
+  assert.equal(retriedEpisode.attempt, 2);
+});
+
+for (const published of [true, false]) {
+  test(`a ${published ? "journaled" : "missing"} model receipt preserves completed writable work`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    const lost = new Error("Model receipt publication was interrupted.");
+    let runId;
+    let interrupted = false;
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      async onTransitionBoundary(point) {
+        if (
+          published &&
+          !interrupted &&
+          point === "event-appended" &&
+          runId !== undefined &&
+          (await store.loadRun(runId)).modelCompletionReceipts.worker != null
+        ) {
+          interrupted = true;
+          throw lost;
+        }
+      },
+    });
+    const candidateReached = Object.assign(new Error("Candidate reached."), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const delegate = createExecutionAdapter();
+    let implementation;
+    let writes = 0;
+    let restatements = 0;
+    const adapters = {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (request.prompt.includes("Original turn facts (runner data)")) {
+            assert.equal(request.access, "read-only");
+            restatements++;
+            return { ...implementation, sessionId: "restated-worker" };
+          }
+          if (request.prompt.includes("Implement the changes described")) {
+            assert.equal(request.access, "workspace-write");
+            writes++;
+            implementation = await delegate.run(request);
+            return withModelCompletion(implementation, request);
+          }
+          if (writes > 0) throw candidateReached;
+          return delegate.run(request);
+        },
+      },
+    };
+    const runner = runnerFor(fixture, adapters, {
+      runStore: published
+        ? store
+        : {
+            ...store,
+            async recordModelCompletion() {
+              interrupted = true;
+              throw lost;
+            },
+          },
+    });
+    const { run } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "test-model" } },
+    });
+    runId = run.runId;
+    if (!published) {
+      await assert.rejects(runner.resume({ runId }), {
+        code: "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
+        cause: lost,
+      });
+      const pending = await store.loadRun(runId);
+      assert.equal(pending.pipelineState.writableResult.stage, "invoking");
+      assert.equal(pending.activeTurn.phase, "implement");
+    }
+    const reopened = runnerFor(fixture, adapters);
+    await assert.rejects((published ? runner : reopened).resume({ runId }), {
+      code: candidateReached.code,
+    });
+    const candidate = await store.loadRun(runId);
+    assert.equal(interrupted, true);
+    assert.equal(
+      Object.hasOwn(candidate.modelCompletionReceipts, "worker"),
+      published,
+    );
+    assert.equal(candidate.pipelineState.writableResult, null);
+    assert.equal(writes, 1);
+    assert.equal(restatements, published ? 0 : 1);
+  });
+}
+
+test("cold coding restatements retain the consumed attempt across a catalog pause", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const execution = pipelineId === "plan-execution";
+    const fixture = await operatorFixture(t, pipelineId);
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    let findings = !execution;
+    let writes = 0;
+    let restatements = 0;
+    adapter.run = async (request) => {
+      const respond = (result) =>
+        withModelCompletion(
+          {
+            structured:
+              request.schema.properties.result === undefined
+                ? result
+                : { result },
+            sessionId: `catalog-${writes}-${restatements}`,
+          },
+          request,
+        );
+      if (
+        findings &&
+        request.prompt.includes("Confirm the finalized change set")
+      ) {
+        findings = false;
+        return respond({
+          status: "FINDINGS",
+          findings: [
+            {
+              id: "R1",
+              file: "source.js",
+              problem: "The candidate needs a repair.",
+              reason: "The repair is required by the task.",
+              suggestedAction: "Add the repair.",
+            },
+          ],
+          validationChange: "UNCHANGED",
+          validationEvidence: [],
+          finalizationFindingIds: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        });
+      }
+      const original =
+        request.access === "workspace-write" &&
+        request.prompt.includes(
+          execution
+            ? "Implement the changes described"
+            : "Resolve every current blocker",
+        );
+      if (original) {
+        writes++;
+        await writeFile(
+          join(fixture.projectPath, "repair.txt"),
+          "preserved bytes\n",
+        );
+        if (execution) assert.equal(await request.onFreshSession(), true);
+        throw modelCatalogMiss({ recovery: true });
+      }
+      if (
+        request.access === "read-only" &&
+        (request.prompt.includes("Original turn facts (runner data)") ||
+          request.prompt.includes("Finding-resolution report diagnostic batch"))
+      ) {
+        if (++restatements === 1) throw modelCatalogMiss();
+        const inactiveFields = {
+          reason: "",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+        return respond(
+          execution
+            ? {
+                ...inactiveFields,
+                status: "COMPLETED",
+                summary: "Implemented the candidate.",
+              }
+            : {
+                ...inactiveFields,
+                status: "RESOLVED",
+                decisions: [
+                  {
+                    id: "R1",
+                    decision: "FIX",
+                    reason: "Added the repair.",
+                    evidence: [],
+                  },
+                ],
+              },
+        );
+      }
+      return withModelCompletion(await runRole(request), request);
+    };
+    const adapters = { codex: adapter };
+    const runner = runnerFor(fixture, adapters);
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "worker-model" } },
+    });
+    const { run: paused } = await runner.resume({ runId: created.runId });
+    const field = execution ? "writableResult" : "resolutionCorrection";
+    assert.equal(paused.pause?.reason, "backend_unavailable", pipelineId);
+    assert.equal(paused.pipelineState[field].attempts, 1);
+    assert.equal(paused.activeTurn, null);
+    if (execution) assert.equal(paused.inactivityRecovery.attempt, 2);
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const interrupted = Object.assign(
+      new Error("Resume acknowledgement was lost."),
+      {
+        code: "ERR_RUN_REVISION_CHANGED",
+      },
+    );
+    const interruptedStore = {
+      ...store,
+      async transitionRun(lease, patch, options) {
+        const next = await store.transitionRun(lease, patch, options);
+        if (
+          patch.pause === null &&
+          patch.pipelineState?.workflowState === paused.pause.resumeState
+        )
+          throw interrupted;
+        return next;
+      },
+    };
+    await assert.rejects(
+      runnerFor(fixture, adapters, { runStore: interruptedStore }).resume({
+        runId: created.runId,
+      }),
+      (cause) => cause === interrupted,
+    );
+    assert.equal(restatements, 1);
+    const resumed = await store.loadRun(created.runId);
+    assert.equal(resumed.activeTurn, null);
+    assert.equal(resumed.pause, null);
+    assert.equal(resumed.pipelineState[field].attempts, 1);
+    const { run: done } = await runnerFor(fixture, adapters, {
+      runStore: createRunStore({ stateRoot: fixture.stateRoot }),
+    }).resume({ runId: created.runId });
+    assert.equal(done.pipelineState.workflowState, "DONE");
+    assert.equal(writes, 1);
+    assert.equal(restatements, 2);
+    assert.equal(done.counters.fixRounds, execution ? 0 : 1);
+    assert.equal(done.inactivityRecovery, null);
+    assert.equal(
+      await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+      "preserved bytes\n",
+    );
+    const history = await store.loadRunHistory(created.runId);
+    assert.ok(
+      history.events.every(
+        ({ state }) => (state.pipelineState[field]?.attempts ?? 0) <= 1,
+      ),
+    );
+    if (execution)
+      assert.equal(
+        history.events.filter(
+          ({ activity }) => activity?.kind === "reconstructing",
+        ).length,
+        1,
+      );
+  }
+});
 
 for (const [pipelineId, kind, boundary, mode] of [
   ["plan-execution", "questions", "readback", "independent"],

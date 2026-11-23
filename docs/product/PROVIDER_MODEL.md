@@ -456,6 +456,21 @@ current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
 
+A complete, well-formed Codex catalog lookup with drained output and a
+successful provider exit can return the redacted `model_unavailable` diagnostic
+for a missing explicit model. An initial pre-thread miss can pause for explicit
+checkpoint retry after the selected role has completed a turn using that frozen
+selection. Publication also requires the retiring invocation's own recorded
+no-effect rejection at its pipeline's mapped checkpoint.
+First use, a source fork, a malformed lookup, and a miss on native recovery do
+not authorize that retry.
+Resume uses the same model, profile and effort after repository and input checks.
+The catalog pause creates no automatic retry or fallback. A malformed response
+or incomplete catalog reports `model_catalog_invalid`; unsupported effort keeps
+its `effort_unsupported` diagnostic. Neither outcome authorizes a fresh
+COMMIT attempt after verification of the consumed authorization.
+See the [catalog recovery contract](../ARCHITECTURE.md#explicit-model-catalog-recovery).
+
 Both adapters and the shared failure boundary carry platform-validated nullable
 `ownershipDiagnostic` evidence without changing failure/effect/retry policy.
 No backend or pipeline derives a raising site from generic codes, native text
@@ -677,9 +692,12 @@ Unavailable admission retains the candidate under the execution-owned
 environment pause; native text reads do not prove binary reconstruction access.
 
 Normalized `authentication_required` failures enter the shared durable
-reauthentication pause only after the runner proves the repository is safe;
-they never enter availability backoff and retire any active episode they
-supersede. Authentication evidence without that disposition, unsafe permissions,
+reauthentication pause only after the runner proves the repository is safe.
+The pause retires any superseded availability episode. A coding-pipeline result
+restatement preserves its consumed read-only attempt and spent inactivity
+allowances through authentication. Output exhaustion also retains the
+availability episode.
+Authentication evidence without that disposition, unsafe permissions,
 forbidden collaboration, isolation failure, invalid contracts, and ambiguous
 writable outcomes fail closed. Allowlisted
 backend, capability, configuration, usage, provider, and source-session
@@ -747,9 +765,8 @@ descriptor-owned bounded evidence contract.
 The runner consumes that disposition through one shared policy. Every pipeline
 persists the same fixed redacted `authentication_required` pause at the failed
 logical checkpoint after read-only or writable reconciliation. It performs no
-automatic retry or availability delay and retires a superseded availability
-episode before pausing. The operator restores authentication and resumes with
-the null action. Public CLI/MCP state exposes no native
+automatic retry or availability delay. The operator restores authentication and
+resumes with the null action. Public CLI/MCP state exposes no native
 message, URL, request identifier, payload, credential material, or
 provider-specific diagnostic. Source-fork requests retry the source only with
 normalized no-effect proof; possible-effect evidence persists the logical

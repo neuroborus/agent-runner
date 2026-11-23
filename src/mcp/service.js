@@ -19,6 +19,7 @@ import {
 } from "../guidance/index.js";
 import { createIssueService, ISSUE_STATUSES } from "../issues/index.js";
 import {
+  createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
@@ -29,7 +30,6 @@ import {
   pipelineRequiresWorktreeLease,
 } from "../runner/index.js";
 import {
-  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,

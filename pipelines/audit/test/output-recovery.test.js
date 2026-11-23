@@ -22,6 +22,48 @@ const evidence = (request) => JSON.parse(request.prompt.split("\n").at(-1));
 const confirmed = (run) =>
   auditPipeline.projections.status(run).auditReport.confirmedFindings;
 
+test("cold catalog resume reuses the retained discovery reservation", async () => {
+  const miss = new Error("Explicit model catalog miss.");
+  const code = "ERR_MODEL_CATALOG_RETRY";
+  const f = fixture([READY, miss], { mode: "lazy", source: "source-session" });
+  f.runtime.catalogRetry = {
+    claimResume: () => false,
+    eligible: (cause) => cause === miss,
+    details: (role, checkpoint) => ({ code, role, checkpoint }),
+  };
+  const paused = await f.execute();
+  assert.equal(paused.pause.code, code);
+  assert.equal(paused.pipelineState.history.length, 1);
+  const { checkpoint, resumeState, role } = paused.pause;
+  const resumed = fixture([complete()], {
+    saved: {
+      ...paused,
+      pipelineState: { ...paused.pipelineState, workflowState: resumeState },
+      pause: null,
+      modelCatalogResume: { checkpoint, resumeState, role },
+    },
+  });
+  resumed.runtime.catalogRetry = {
+    claimResume(selectedRole, selectedCheckpoint) {
+      assert.equal(selectedRole, role);
+      assert.equal(selectedCheckpoint, checkpoint);
+      return true;
+    },
+  };
+  const start = resumed.runtime.startAgentTurn;
+  resumed.runtime.startAgentTurn = (turn, options) => {
+    assert.equal(options.catalogCheckpoint, checkpoint);
+    return start(turn, options);
+  };
+  const done = await resumed.execute();
+  assert.equal(done.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.deepEqual(
+    done.pipelineState.history.map(({ outcome }) => outcome),
+    ["clean"],
+  );
+  assert.equal(resumed.calls[0].session?.mode, "continue");
+});
+
 test("explicit exhaustion recovery replaces the child without replacing the combined reservation or owner", async () => {
   const f = fixture([READY, outputExhaustion()], {
     mode: "combined",

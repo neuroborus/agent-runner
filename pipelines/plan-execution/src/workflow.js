@@ -4,8 +4,13 @@ import { isDeepStrictEqual } from "node:util";
 import { canonicalExecutionPlan, planKindPolicy } from "./step-policy.js";
 
 import {
+  beginWritableRestatement,
+  CATALOG_IMPLEMENTATION_VERIFIED,
   createWritableResult,
   createRepairReport,
+  legacyWritableExpiryStart,
+  matchesWritableRestatementCatalogAttempt,
+  originalWritableCheckpoint,
   rebindWritableRepair,
   writableResultDiagnostic,
 } from "./writable-result.js";
@@ -57,11 +62,15 @@ import {
   inspectionRequirements,
 } from "./capability-requirements.js";
 import {
+  candidateCheckCheckpoint,
   candidateCheckpoint,
+  candidateCleanCheckpoint,
+  candidateReviewCheckpoint,
   combinedReview,
   primaryFindings,
   executionPolicy,
   findingResolutionCheckpoint,
+  roleProducingPhase,
   selectRoleSession,
 } from "./mode-policy.js";
 import {
@@ -83,7 +92,12 @@ import {
   validationEvidenceFingerprint,
   acceptedValidationAmendment,
 } from "./validation-schedule.js";
-import { verifiedCommitCheckpoint } from "./commit-checkpoint.js";
+import {
+  isCatalogCommitRejection,
+  isNonRetryableCommitModelRejection,
+  isNonRetryableCommitRejection,
+  verifiedCommitCheckpoint,
+} from "./commit-checkpoint.js";
 import { canRecoverLegacyConfirmation } from "./legacy-confirmation-recovery.js";
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
@@ -151,7 +165,6 @@ import {
   assertSettings,
   createFinalizationGuidanceDecision,
   createFinalizationRecovery,
-  commitReadinessConstraint,
   finalizationFeedbackFindings,
   findingFingerprint,
   createPersistedFinalizationEvidence,
@@ -233,6 +246,7 @@ const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+const CATALOG_WORKSPACE_CHANGED = "ERR_MODEL_CATALOG_WORKSPACE_CHANGED";
 const WRITABLE_RESULT_SCHEMAS = new Set([
   IMPLEMENTATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
@@ -760,6 +774,8 @@ export async function runPlanExecution({
   settings,
   operatorStop = false,
   operatorStopPreEffectRejection = null,
+  operatorStopReadOnlyCatalogRejection = null,
+  interruptedWritableNoEffect = false,
 }) {
   assertRun(run);
   const stepPolicy = planKindPolicy(run.pipelineState.planKind);
@@ -792,7 +808,7 @@ export async function runPlanExecution({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
-  // A published pause must survive an interrupted persistence response.
+  // A provider pause or resume may already be durable when publication throws.
   let dispositionPausePersistence = false;
   // An unacknowledged history publication may already be authoritative.
   let workReportPublicationFailure = null;
@@ -933,14 +949,24 @@ Include every listed command exactly once in requiredChecks with its actual cano
     };
   }
 
-  async function restartFinalizationAfterConfirmationDrift(current, code) {
+  async function handleConfirmationScopeDrift(current, code) {
+    const clearedFinalization = {
+      ...clearedTerminalGate(),
+      finalizationCorrections: [],
+      pendingFinalizationCorrection: null,
+    };
+    // An accepted catalog retry can stop safely before its bound turn starts.
+    if (currentRun.modelCatalogResume?.resumeState === "CONFIRM") {
+      await pause("unsafe_git_state", { code }, clearedFinalization, {
+        nextActiveTurn: null,
+      });
+      return false;
+    }
     await transition(
       {
         ...current,
         workflowState: "FINALIZE",
-        ...clearedTerminalGate(),
-        finalizationCorrections: [],
-        pendingFinalizationCorrection: null,
+        ...clearedFinalization,
       },
       {
         publicActivity: activity(
@@ -951,6 +977,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
+    return true;
   }
 
   async function pauseAfterConfirmationContentDrift(current, code) {
@@ -981,10 +1008,24 @@ Include every listed command exactly once in requiredChecks with its actual cano
       publicActivity,
       expectedRevision,
       nextActiveTurn,
+      retainProviderRecovery,
     } = {},
   ) {
     if (workReportPublicationFailure !== null)
       throw workReportPublicationFailure.cause;
+    if (
+      nextPipelineState.catalogReviewInfrastructureFingerprint !== undefined &&
+      (!["REVIEW", "CLEAN_CONFIRM", "WAITING_FOR_USER"].includes(
+        nextPipelineState.workflowState,
+      ) ||
+        (state().workflowState === "CLEAN_CONFIRM" &&
+          nextPipelineState.workflowState === "REVIEW") ||
+        pause?.reason === "review_output_invalid")
+    ) {
+      const { catalogReviewInfrastructureFingerprint: _, ...remainingState } =
+        nextPipelineState;
+      nextPipelineState = remainingState;
+    }
     if (nextPipelineState.currentStep !== state().currentStep) {
       nextPipelineState = {
         ...nextPipelineState,
@@ -1032,6 +1073,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       currentRun = await runtime.transition(patch, {
         activity: publicActivity,
         expectedRevision,
+        retainProviderRecovery,
       });
     } catch (cause) {
       if (publishesWorkReports) workReportPublicationFailure = { cause };
@@ -1048,11 +1090,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     pipelineStatePatch = {},
     options = {},
   ) {
-    dispositionPausePersistence = [
-      "authentication_required",
-      "output_exhausted",
-      "validation_policy_blocked",
-    ].includes(reason);
+    dispositionPausePersistence =
+      [
+        "authentication_required",
+        "output_exhausted",
+        "validation_policy_blocked",
+      ].includes(reason) ||
+      options.nextActiveTurn === null ||
+      (details.code !== undefined &&
+        details.code === runtime.catalogRetry?.code);
     await transition(
       {
         ...state(),
@@ -1063,12 +1109,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ...options,
         nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { ...details, reason },
-        publicActivity: activity(
-          "runner",
-          "plan-execution",
-          "paused",
-          `Plan execution paused: ${reason}.`,
-        ),
+        publicActivity:
+          options.publicActivity ??
+          activity(
+            "runner",
+            "plan-execution",
+            "paused",
+            `Plan execution paused: ${reason}.`,
+          ),
       },
     );
     dispositionPausePersistence = false;
@@ -1139,16 +1187,20 @@ Include every listed command exactly once in requiredChecks with its actual cano
       rejection.outputExhaustion?.disposition === "output_exhausted";
     const authenticationRequired =
       rejection.authentication?.disposition === "authentication_required";
+    const catalogMiss = rejection.catalog !== undefined;
     const reason = outputExhausted
       ? "output_exhausted"
       : authenticationRequired
         ? "authentication_required"
-        : rejection.recoverable
+        : catalogMiss || rejection.recoverable
           ? "backend_unavailable"
           : "commit_failed";
     const diagnosticClass =
       reason === "commit_failed" ? rejection.diagnosticClass : undefined;
-    dispositionPausePersistence = outputExhausted || authenticationRequired;
+    dispositionPausePersistence =
+      outputExhausted ||
+      authenticationRequired ||
+      isNonRetryableCommitModelRejection(rejection);
     await transition(
       {
         ...state(),
@@ -1164,9 +1216,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
               ? "ERR_AUTHENTICATION_REQUIRED"
               : rejection.code,
           resumeState: "COMMIT",
-          ...(outputExhausted
-            ? { role: "worker", checkpoint: `commit:${state().currentStep}` }
-            : {}),
+          ...(catalogMiss
+            ? runtime.catalogRetry.details(
+                "worker",
+                `commit:${state().currentStep}`,
+              )
+            : outputExhausted
+              ? { role: "worker", checkpoint: `commit:${state().currentStep}` }
+              : {}),
           ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
         },
         publicActivity: activity(
@@ -1274,6 +1331,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         validationInfrastructure: null,
         validationInfrastructureFingerprint: null,
         validationMigrationPending: false,
+        validationMigrationDisagreement: null,
         findings: [],
         previousFindings: [],
         pendingDisputes: [],
@@ -1733,6 +1791,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return false;
     }
     if (!(await ensurePlanPosition())) return false;
+    const hasNoEffectProof =
+      interruptedWritableNoEffect && interruptedTurn === run.activeTurn;
     if (state().writableResult !== null) {
       const checkpoint = state().writableResult;
       const correcting = checkpoint.stage === "correcting";
@@ -1741,7 +1801,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         inspected = await safety.reconcileInterrupted(
           state().repositoryBaseline,
           {
-            allowWorkspaceChanges: !correcting && !checkpoint.budgetExhausted,
+            allowWorkspaceChanges:
+              !correcting && !checkpoint.budgetExhausted && !hasNoEffectProof,
             allowIndexChanges: false,
           },
         );
@@ -1759,6 +1820,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
         });
         return false;
       }
+      const recovery = currentRun.inactivityRecovery;
+      if (hasInterruptedRestatementExpiry(checkpoint, inspected)) {
+        const retry = recovery.attempt === 1;
+        const published = await publishRestatementInactivity(retry);
+        interruptedTurn = null;
+        interruptedRepositoryReconciled = true;
+        return published && retry;
+      }
       writableCheckpointPersistence = true;
       currentRun = await runtime.finishAgentTurn(interruptedTurn);
       writableCheckpointPersistence = false;
@@ -1774,7 +1843,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
     const supersededByValidationMigration = state().validationMigrationPending;
-    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    const allowWorkspaceChanges =
+      !hasNoEffectProof && interruptedTurnIsWritable(interruptedTurn);
     let reconciledRepository;
     try {
       reconciledRepository = await safety.reconcileInterrupted(
@@ -1961,6 +2031,79 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return true;
   }
 
+  function restatementExpiryStart(reservation) {
+    return (
+      reservation.restatementStartedAfter ??
+      legacyWritableExpiryStart(run, currentRun)
+    );
+  }
+
+  function matchesRestatementExpiry(reservation, role, repository) {
+    const recovery = currentRun.inactivityRecovery;
+    return (
+      recovery?.role === role &&
+      runtime.matchesObservedInactivityExpiry?.(
+        currentRun,
+        restatementExpiryStart(reservation),
+      ) === true &&
+      recovery.contentFingerprint === repository.contentFingerprint &&
+      reservation.candidateFingerprint ===
+        executionContentFingerprint(state(), repository)
+    );
+  }
+
+  function hasInterruptedRestatementExpiry(reservation, repository) {
+    const recovery = currentRun.inactivityRecovery;
+    return (
+      reservation.stage === "correcting" &&
+      reservation.productDecision === null &&
+      state().workflowState === reservation.phase &&
+      interruptedTurn?.phase === "writable-result" &&
+      interruptedTurn.role === "worker" &&
+      recovery?.status === "expired" &&
+      [
+        originalWritableCheckpoint(reservation),
+        `writable-result:read-only:commit:${reservation.step}`,
+      ].includes(recovery.checkpoint) &&
+      matchesRestatementExpiry(reservation, "worker", repository)
+    );
+  }
+
+  async function publishRestatementInactivity(
+    retry,
+    { stopping = false } = {},
+  ) {
+    const reservation = state().writableResult;
+    // A historical invocation without an inspected scope has nothing to recheck.
+    if (
+      reservation.restatementValidationFingerprint !== undefined &&
+      !(await verifyRestatementValidationScope())
+    )
+      return false;
+    const writableResult = {
+      ...reservation,
+      restatementStartedAfter: restatementExpiryStart(reservation),
+      stage: retry ? "inactivity-ready" : "retry-ready",
+    };
+    if (retry || stopping) {
+      await transition(
+        { ...state(), writableResult },
+        { nextActiveTurn: null },
+      );
+    } else {
+      await pause(
+        "backend_unavailable",
+        {
+          code: "ERR_PROVIDER_INACTIVE",
+          resumeState: state().workflowState,
+        },
+        { writableResult },
+        { nextActiveTurn: null },
+      );
+    }
+    return true;
+  }
+
   let resumedOutputCheckpoint =
     currentRun.pause?.reason === "output_exhausted"
       ? currentRun.pause.checkpoint
@@ -1981,6 +2124,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       const result = await runRoleAttempt(role, schema, buildPrompt, options);
       if (result !== availabilityRetry) return result;
       await options?.onAvailabilityRetry?.();
+      options = { ...options, continueEpisode: false };
     }
   }
 
@@ -1991,6 +2135,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
     {
       access = "read-only",
       checkpoint,
+      candidateInfrastructureFingerprint,
+      verifyCandidateScope,
       freshSession = false,
       recoveryContext = "",
       contextReview = false,
@@ -1998,6 +2144,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       focusedContext,
       outputExhaustionPatch,
       resultRestatement = false,
+      continueEpisode = false,
       writableFacts,
     } = {},
   ) {
@@ -2023,26 +2170,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
       throw workflowError("Replacement work is not prepared.");
     if (access === "workspace-write" && !(await ensureCheckRequirements()))
       return null;
-    const refinementPhase = checkpoint.startsWith("commit-size:")
-      ? "commit-size"
-      : checkpoint.startsWith("effective-plan:")
-        ? "effective-plan"
-        : ["bootstrap", "validation-migration"].includes(checkpoint) &&
-            effectivePlanAuthority(state()).binding.revision > 0
-          ? "revision-validation"
-          : null;
-    const turn = resultRestatement
-      ? { role: "worker", phase: "writable-result" }
-      : contextReview
-        ? { role, phase: "plan-context" }
-        : refinementPhase !== null
-          ? { role, phase: refinementPhase }
-          : activeTurn(
-              role,
-              checkpoint === "validation-migration"
-                ? "VALIDATION_MIGRATION"
-                : state().workflowState,
-            );
+    const producingPhase = roleProducingPhase(state(), checkpoint);
+    const turn = {
+      role,
+      phase: resultRestatement
+        ? "writable-result"
+        : contextReview
+          ? "plan-context"
+          : producingPhase,
+    };
     const retrying = currentRun.availabilityRetry != null;
     const recovering =
       interruptedTurn !== null ||
@@ -2115,18 +2251,29 @@ Include every listed command exactly once in requiredChecks with its actual cano
     // Narrative review has no accepted result yet. Rebuild its read-only
     // producing turn under the same recovery allowance before reviewing again.
     const narrativeCheckpoint = `plan-context:read-only:${checkpoint}`;
+    const narrativeCatalogCheckpoint = `${producingPhase}:read-only:plan-context:${checkpoint}`;
     const recoveries = [
       currentRun.availabilityRetry,
       currentRun.inactivityRecovery,
     ];
+    // Keep the spent recovery attached to the original durable reservation
+    // while its report is restated read-only.
+    const originalCheckpoint = resultRestatement
+      ? originalWritableCheckpoint(state().writableResult)
+      : null;
+    const retainedWritableRecovery = recoveries.some(
+      (recovery) =>
+        recovery?.role === role && recovery.checkpoint === originalCheckpoint,
+    );
     const reconstructingNarrative =
       !contextReview &&
       access === "read-only" &&
-      recoveries.some(
+      (recoveries.some(
         (recovery) =>
           recovery?.role === role &&
           recovery.checkpoint === narrativeCheckpoint,
-      );
+      ) ||
+        runtime.catalogRetry?.resuming(role, narrativeCatalogCheckpoint));
     // Version 27 bound migration retries to the suspended workflow phase.
     // Keep that exact recovery checkpoint until success, without changing the
     // new read-only turn identity or renewing either recovery allowance.
@@ -2140,11 +2287,21 @@ Include every listed command exactly once in requiredChecks with its actual cano
           recovery?.role === role &&
           recovery.checkpoint === legacyMigrationCheckpoint,
       );
+    const turnCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
     const availabilityCheckpoint = reconstructingNarrative
       ? narrativeCheckpoint
       : resumingLegacyMigration
         ? legacyMigrationCheckpoint
-        : `${turn.phase}:${access}:${checkpoint}`;
+        : retainedWritableRecovery
+          ? originalCheckpoint
+          : turnCheckpoint;
+    const catalogCheckpoint = reconstructingNarrative
+      ? narrativeCatalogCheckpoint
+      : turnCheckpoint;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      catalogCheckpoint,
+    );
     const continuingNarrativeRecovery =
       contextReview &&
       narrativeRecovery?.role === role &&
@@ -2160,10 +2317,36 @@ Include every listed command exactly once in requiredChecks with its actual cano
       });
     }
     if (runtime.inactivity !== undefined && !continuingNarrativeRecovery) {
+      let continueRecovery =
+        catalogResume || (continueEpisode && retainedWritableRecovery);
+      if (resultRestatement) {
+        const reservation = state().writableResult;
+        if (reservation.stage === "retry-ready") continueRecovery = true;
+        if (reservation.stage === "inactivity-ready") {
+          const recovery = currentRun.inactivityRecovery;
+          const reconstructing =
+            recovery?.status === "reconstructing" &&
+            recovery.reconstructionRevision > recovery.expiryRevision;
+          if (
+            !matchesRestatementExpiry(reservation, role, turnSnapshot) ||
+            recovery.checkpoint !== availabilityCheckpoint ||
+            (!reconstructing &&
+              (recovery.status !== "expired" || recovery.attempt !== 1))
+          )
+            throw workflowError(
+              "Read-only restatement lost its inactivity recovery evidence.",
+              "ERR_INACTIVITY_RECOVERY",
+            );
+          // A restart before turn start can retain the reconstruction already
+          // reserved for this expiry. Dispatch without spending it again.
+          continueRecovery = reconstructing;
+        }
+      }
       currentRun = await runtime.inactivity.before({
         role,
         checkpoint: availabilityCheckpoint,
         repository: turnSnapshot,
+        continueEpisode: continueRecovery,
       });
     }
     const latestSession = [...currentRun.sessionLineage.children]
@@ -2189,7 +2372,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             contextKey,
             sourceSession: currentRun.sessionLineage.source,
             sourceForkConsumed: state().lazySourceForkConsumed,
-            recovering,
+            recovering: recovering || catalogResume || reconstructingNarrative,
             freshSession: freshSession || resultRestatement,
           });
     const sourceForkRecovery = state().authenticationSourceForkRecovery;
@@ -2282,6 +2465,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
     resumeSessionContext = false;
     let response;
     let agentError;
+    let writableNoEffect = false;
+    let configurationChangedWithoutEffect = false;
     let repositoryReconciled = false;
     let inactivityFailure = false;
     let availabilityFailure = false;
@@ -2302,35 +2487,72 @@ Include every listed command exactly once in requiredChecks with its actual cano
       !resultRestatement &&
       state().writableResult !== null &&
       WRITABLE_RESULT_SCHEMAS.has(schema);
+    const invocationResult = originalWritableTurn
+      ? { ...state().writableResult, stage: "invoking" }
+      : null;
+    let restatementValidationFingerprint;
+    if (resultRestatement) {
+      restatementValidationFingerprint =
+        await validationInfrastructureFingerprint(
+          state().validationInfrastructure,
+        );
+      const reserved = state().writableResult.restatementValidationFingerprint;
+      if (
+        reserved !== undefined &&
+        restatementValidationFingerprint !== reserved
+      ) {
+        await pauseRestatementValidationDrift();
+        return null;
+      }
+    }
     writableCheckpointPersistence = originalWritableTurn || resultRestatement;
-    currentRun = await runtime.startAgentTurn(
-      turn,
-      consumeSourceFork || originalWritableTurn
+    if (catalogResume) dispositionPausePersistence = true;
+    currentRun = await runtime.startAgentTurn(turn, {
+      ...(catalogResume ? { catalogCheckpoint } : {}),
+      ...(resultRestatement
+        ? {
+            preparePipelineState: (pipelineState, revision) => ({
+              ...pipelineState,
+              writableResult: beginWritableRestatement(
+                pipelineState.writableResult,
+                revision,
+                restatementValidationFingerprint,
+              ),
+            }),
+          }
+        : {}),
+      ...(consumeSourceFork || invocationResult !== null
         ? {
             pipelineState: {
               ...state(),
               ...(consumeSourceFork ? { lazySourceForkConsumed: true } : {}),
-              ...(originalWritableTurn
-                ? {
-                    writableResult: {
-                      ...state().writableResult,
-                      stage: "invoking",
-                    },
-                  }
+              ...(invocationResult !== null
+                ? { writableResult: invocationResult }
                 : {}),
             },
           }
-        : undefined,
-    );
+        : {}),
+    });
+    if (catalogResume) dispositionPausePersistence = false;
     writableCheckpointPersistence = false;
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
     try {
+      if (verifyCandidateScope !== undefined && !(await verifyCandidateScope()))
+        return null;
       try {
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        writableNoEffect =
+          access === "workspace-write" &&
+          runtime.catalogRetry?.hasWritableNoEffect(turn) === true;
+        configurationChangedWithoutEffect =
+          writableNoEffect &&
+          cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED";
+        // The Runner owns retirement with the configuration pause.
+        if (configurationChangedWithoutEffect) throw cause;
         if (writableCheckpointPersistence || isOwnershipFailure(cause))
           throw cause;
         inactivityFailure =
@@ -2341,10 +2563,27 @@ Include every listed command exactly once in requiredChecks with its actual cano
           runtime.authentication?.eligible(cause) === true;
         outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
+      const catalogMiss = runtime.catalogRetry?.eligible(agentError) === true;
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
         await safety.assertUnchanged(turnSnapshot);
         await safety.assertUnchanged(baseline);
+      } else if (writableNoEffect) {
+        try {
+          await safety.assertUnchanged(turnSnapshot);
+          await safety.assertUnchanged(baseline);
+        } catch (cause) {
+          if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") throw cause;
+          await pause(
+            "unsafe_git_state",
+            { code: CATALOG_WORKSPACE_CHANGED },
+            {},
+            {
+              nextActiveTurn: null,
+            },
+          );
+          return null;
+        }
       } else {
         nextRepositoryBaseline = await safety.snapshot({
           allowedPaths: baseline.allowedPaths,
@@ -2361,6 +2600,81 @@ Include every listed command exactly once in requiredChecks with its actual cano
       }
       if ((await readCurrentInputs()) === null) {
         return null;
+      }
+      const lostCatalogResult =
+        originalWritableTurn &&
+        runtime.catalogRetry?.hasPossibleEffect(agentError);
+      if (catalogMiss || lostCatalogResult) {
+        const pending = state().writableResult;
+        const unstartedImplementation =
+          catalogMiss &&
+          writableNoEffect &&
+          !inactivityFailure &&
+          originalWritableTurn &&
+          pending.phase === "IMPLEMENT" &&
+          !pending.rework &&
+          currentRun.availabilityRetry == null &&
+          currentRun.inactivityRecovery == null;
+        if (originalWritableTurn && !unstartedImplementation)
+          await reconcileWritableResult(
+            catalogMiss
+              ? nextRepositoryBaseline
+              : await safety.reconcileInterrupted(baseline, {
+                  allowWorkspaceChanges: access === "workspace-write",
+                  allowIndexChanges: false,
+                }),
+          );
+        if (catalogMiss) {
+          const reconciled = state().writableResult;
+          if (
+            originalWritableTurn &&
+            !unstartedImplementation &&
+            reconciled.attempts >= reconciled.additionalAttempts + 1
+          ) {
+            await exhaustWritableResult(undefined, { nextActiveTurn: null });
+            return null;
+          }
+          if (resultRestatement && !(await verifyRestatementValidationScope()))
+            return null;
+          const resumeCheckpoint =
+            originalWritableTurn && !unstartedImplementation
+              ? `writable-result:read-only:commit:${reconciled.step}`
+              : contextReview
+                ? narrativeCatalogCheckpoint
+                : catalogCheckpoint;
+          await pause(
+            "backend_unavailable",
+            {
+              ...runtime.catalogRetry.details(role, resumeCheckpoint),
+              resumeState: state().workflowState,
+            },
+            {
+              ...(candidateInfrastructureFingerprint === undefined
+                ? {}
+                : {
+                    catalogReviewInfrastructureFingerprint:
+                      candidateInfrastructureFingerprint,
+                  }),
+              ...(unstartedImplementation
+                ? { writableResult: { ...pending, stage: "prepared" } }
+                : resultRestatement
+                  ? { writableResult: { ...pending, stage: "retry-ready" } }
+                  : {}),
+            },
+            unstartedImplementation
+              ? {
+                  publicActivity: activity(
+                    "runner",
+                    "implement",
+                    CATALOG_IMPLEMENTATION_VERIFIED,
+                    "Catalog lookup had no effect and the workspace is unchanged.",
+                  ),
+                }
+              : {},
+          );
+          return null;
+        }
+        throw agentError;
       }
       // Classified non-output failures retain their established recovery
       // convention. A missing/malformed result or interrupted publication never
@@ -2534,6 +2848,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
           );
           return null;
         }
+        if (
+          resultRestatement &&
+          !(await verifyRestatementValidationScope(sourceForkPatch))
+        )
+          return null;
         await pause(
           exhausted ? "output_exhausted" : "authentication_required",
           {
@@ -2541,20 +2860,64 @@ Include every listed command exactly once in requiredChecks with its actual cano
               ? "ERR_OUTPUT_EXHAUSTED"
               : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: state().workflowState,
-            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
+            ...(exhausted
+              ? {
+                  role,
+                  checkpoint: resultRestatement
+                    ? turnCheckpoint
+                    : availabilityCheckpoint,
+                }
+              : {}),
           },
           {
             ...exhaustedWorkspace?.state,
             ...sourceForkPatch,
           },
-          exhaustedWorkspace?.options,
+          {
+            ...exhaustedWorkspace?.options,
+            retainProviderRecovery: resultRestatement && exhausted,
+          },
         );
         return null;
+      }
+      if (resultRestatement && availabilityFailure) {
+        if (!(await verifyRestatementValidationScope())) return null;
+        // Publish the next backoff and the same consumed read-only attempt
+        // together. A lost invocation without that publication stays lost.
+        writableCheckpointPersistence = true;
+        currentRun = await runtime.availability.schedule({
+          cause: agentError,
+          role,
+          checkpoint: availabilityCheckpoint,
+          repository: baseline,
+          reconciledTurn: turn,
+          pipelineState: {
+            ...state(),
+            writableResult: {
+              ...state().writableResult,
+              stage: "retry-ready",
+            },
+          },
+        });
+        writableCheckpointPersistence = false;
+        assertRun(currentRun);
+        return availabilityRetry;
+      }
+      if (resultRestatement && runtime.inactivity?.eligible(agentError)) {
+        writableCheckpointPersistence = true;
+        const retry = await runtime.inactivity.retry({
+          repository: baseline,
+          reconciledTurn: turn,
+          expiredAfter: state().writableResult.restatementStartedAfter,
+        });
+        if (!(await publishRestatementInactivity(retry))) return null;
+        return retry ? availabilityRetry : null;
       }
     } finally {
       if (
         !dispositionPausePersistence &&
         !writableCheckpointPersistence &&
+        !configurationChangedWithoutEffect &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
@@ -3699,6 +4062,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     outputExhaustionPatch,
     focusedContext,
     correctionPatch = () => ({}),
+    deferCorrectionClear = false,
   }) {
     const context =
       suppliedContext ?? roleOutputContextFor(role, schema, checkpoint);
@@ -3788,7 +4152,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           ))
         )
           return null;
-        if (correction !== undefined) {
+        if (correction !== undefined && !deferCorrectionClear) {
           await transition({
             ...state(),
             pendingBootstrapCorrection: null,
@@ -3960,6 +4324,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerValidation: null,
         bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         validationMigrationPending: true,
+        validationMigrationDisagreement: null,
       });
     }
     return true;
@@ -4008,6 +4373,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
               workerValidation: null,
               reviewerValidation: null,
               planContextVersion: 1,
+              validationMigrationDisagreement: null,
             }
           : {}),
       });
@@ -4020,7 +4386,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
     if (
       !current.validationMigrationPending ||
       current.workflowState !== "WAITING_FOR_USER" ||
-      current.pendingEdit !== null
+      current.pendingEdit !== null ||
+      currentRun.modelCatalogResume != null ||
+      (currentRun.pause?.code !== undefined &&
+        currentRun.pause.code === runtime.catalogRetry?.code)
     ) {
       return false;
     }
@@ -4033,6 +4402,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const resumeImplementation =
       currentRun.pause?.resumeState === "IMPLEMENT" &&
       current.finalizationResult === null;
+    const resumingMigrationArbitration =
+      current.validationMigrationDisagreement !== null &&
+      currentRun.pause?.resumeState !== undefined;
     const additionalFixRounds =
       resumeAction?.type === "extra-fix-rounds"
         ? current.additionalFixRounds + resumeAction.amount
@@ -4043,9 +4415,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
         : {
             ...invalidatedLegacyValidation(
               current,
-              resumeImplementation
-                ? "IMPLEMENT"
-                : candidateCheckpoint(current.settings),
+              resumingMigrationArbitration
+                ? currentRun.pause.resumeState
+                : resumeImplementation
+                  ? "IMPLEMENT"
+                  : candidateCheckpoint(current.settings),
             ),
             additionalFixRounds,
           },
@@ -4137,6 +4511,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return true;
   }
 
+  function clearedValidationMigrationArbitration() {
+    return {
+      validationMigrationDisagreement: null,
+      ...(pendingBootstrapCorrection(
+        arbitrationOutputContext("validation-migration"),
+      ) === undefined
+        ? {}
+        : { pendingBootstrapCorrection: null }),
+    };
+  }
+
   async function completeValidationMigration(
     actor,
     summary,
@@ -4160,6 +4545,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         resolvedSummary: summary,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed,
+        ...clearedValidationMigrationArbitration(),
       },
       {
         publicActivity: activity(
@@ -4215,10 +4601,26 @@ ${JSON.stringify(
       });
       return false;
     }
+    await transition(
+      { ...state(), validationMigrationDisagreement: result.disagreement },
+      {
+        publicActivity: activity(
+          "worker",
+          "migration",
+          "validation-disagreement",
+          "Validation migration disagreement requires arbitration.",
+        ),
+      },
+    );
+    return true;
+  }
+
+  async function arbitrateValidationMigration() {
     const arbitration = await runBootstrapContract({
       role: "arbiter",
       schema: BOOTSTRAP_ARBITRATION_SCHEMA,
       checkpoint: "validation-migration",
+      deferCorrectionClear: true,
       buildPrompt: (evidence) => `${BOOTSTRAP_ARBITRATION_INSTRUCTIONS}
 
 Resolve only this summary and validation-inventory migration disagreement. Legacy summary, resolved context, and validation evidence is provisional and must not be selected.
@@ -4230,7 +4632,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 ${evidence}
 
 Recorded disagreement:
-${JSON.stringify(result.disagreement, null, 2)}
+${JSON.stringify(state().validationMigrationDisagreement, null, 2)}
 
 Independent validation evidence:
 ${JSON.stringify(
@@ -4255,7 +4657,14 @@ ${JSON.stringify(
       },
     };
     if (arbitration.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(arbitration, workReport);
+      await pause(
+        "plan_revision_required",
+        { explanation: arbitration.reason, evidence: arbitration.evidence },
+        {
+          workReports: retainWorkReport(state().workReports, workReport),
+          ...clearedValidationMigrationArbitration(),
+        },
+      );
       return false;
     }
     return completeValidationMigration(
@@ -4285,6 +4694,9 @@ ${JSON.stringify(
       state().reviewerValidation.capabilityRequirements === null
     ) {
       return rediscoverValidationRole("reviewer");
+    }
+    if (state().validationMigrationDisagreement !== null) {
+      return arbitrateValidationMigration();
     }
     return reconcileValidationMigration();
   }
@@ -5571,16 +5983,19 @@ ${plannedStepContext(step)}${
     return { result, customCandidate };
   }
 
-  async function acceptWritableOutput(output, schema) {
-    const { result, customCandidate } = normalizeWritableOutput(output, schema);
+  async function acceptWritableOutput(output, schema, verifyAcceptanceScope) {
     const checkpoint = state().writableResult;
     if (
       (await readCurrentInputs()) === null ||
       !(await verifyPersistedRepository())
     )
       return false;
-    if ((await contentFingerprint()) !== checkpoint.candidateFingerprint)
+    const inspectedFingerprint = await contentFingerprint();
+    if (inspectedFingerprint !== checkpoint.candidateFingerprint)
       return pauseWritableResultDrift();
+    if (verifyAcceptanceScope !== undefined && !(await verifyAcceptanceScope()))
+      return false;
+    const { result, customCandidate } = normalizeWritableOutput(output, schema);
     if (result.status === "VALIDATION_POLICY_BLOCKED")
       return validationPolicyBlocked(result);
     if (result.status === "UNFINISHED") {
@@ -5661,8 +6076,12 @@ ${plannedStepContext(step)}${
       return settleWritableProductDecision();
     }
     return schema === IMPLEMENTATION_SCHEMA
-      ? acceptImplementationResult(result, customCandidate)
-      : acceptResolutionResult(result, customCandidate);
+      ? acceptImplementationResult(
+          result,
+          customCandidate,
+          inspectedFingerprint,
+        )
+      : acceptResolutionResult(result, customCandidate, inspectedFingerprint);
   }
 
   async function invokeWritableResult(schema, prompt, options) {
@@ -5671,11 +6090,13 @@ ${plannedStepContext(step)}${
       if (output === null) return false;
       return await acceptWritableOutput(output, schema);
     } catch (cause) {
+      if (state().writableResult === null) throw cause;
       if (
-        cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
-        state().writableResult === null
+        runtime.catalogRetry?.hasPossibleEffect(cause) &&
+        state().writableResult.stage === "ready"
       )
-        throw cause;
+        return restateWritableResult();
+      if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") throw cause;
       await transition({
         ...state(),
         writableResult: {
@@ -5697,7 +6118,7 @@ ${plannedStepContext(step)}${
     return false;
   }
 
-  async function exhaustWritableResult(cause) {
+  async function exhaustWritableResult(cause, options) {
     const checkpoint = state().writableResult;
     const diagnostic = writableResultDiagnostic(
       cause ?? {
@@ -5713,6 +6134,7 @@ ${plannedStepContext(step)}${
         diagnostic,
       },
       { writableResult: { ...checkpoint, stage: "exhausted", diagnostic } },
+      options,
     );
     return false;
   }
@@ -5734,6 +6156,70 @@ ${plannedStepContext(step)}${
     return result;
   }
 
+  async function stopCatalogRestatement() {
+    const rejection = operatorStopReadOnlyCatalogRejection;
+    const reservation = state().writableResult;
+    // A historical invocation without an inspected scope has no stop retry proof.
+    if (
+      rejection === null ||
+      reservation.restatementValidationFingerprint === undefined
+    )
+      return false;
+    const binding = {
+      role: "worker",
+      checkpoint: `writable-result:read-only:commit:${reservation.step}`,
+      resumeState: reservation.phase,
+    };
+    if (
+      !matchesWritableRestatementCatalogAttempt(
+        currentRun,
+        binding,
+        rejection.turnStart,
+        rejection.attempt,
+      )
+    )
+      return false;
+    if ((await contentFingerprint()) !== reservation.candidateFingerprint) {
+      await pauseWritableResultDrift();
+      return true;
+    }
+    if (!(await verifyFinalizationGuidance())) return true;
+    if (custom) await checkpoint().verify();
+    if (!(await verifyRestatementValidationScope())) return true;
+    await pause(
+      "backend_unavailable",
+      {
+        ...binding,
+        code: runtime.catalogRetry.code,
+      },
+      { writableResult: { ...reservation, stage: "retry-ready" } },
+    );
+    return true;
+  }
+
+  async function pauseRestatementValidationDrift(pipelineStatePatch = {}) {
+    await pause(
+      "unsafe_git_state",
+      {
+        code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      },
+      pipelineStatePatch,
+      { nextActiveTurn: null },
+    );
+  }
+
+  async function verifyRestatementValidationScope(pipelineStatePatch) {
+    const current = state();
+    if (
+      (await validationInfrastructureFingerprint(
+        current.validationInfrastructure,
+      )) === current.writableResult.restatementValidationFingerprint
+    )
+      return true;
+    await pauseRestatementValidationDrift(pipelineStatePatch);
+    return false;
+  }
+
   async function restateWritableResult() {
     if (state().writableResult.productDecision !== null)
       return settleWritableProductDecision();
@@ -5752,26 +6238,31 @@ ${plannedStepContext(step)}${
     if ((await contentFingerprint()) !== pending.candidateFingerprint)
       return pauseWritableResultDrift();
     if (custom) await checkpoint().verify();
+    const retryReady =
+      ["retry-ready", "inactivity-ready"].includes(pending.stage) ||
+      (pending.stage === "correcting" &&
+        currentRun.modelCatalogResume?.role === "worker" &&
+        currentRun.modelCatalogResume?.checkpoint ===
+          `writable-result:read-only:commit:${pending.step}`);
     if (
-      pending.stage !== "ready" ||
-      pending.attempts >= 1 + pending.additionalAttempts
+      !retryReady &&
+      (pending.stage !== "ready" ||
+        pending.attempts >= 1 + pending.additionalAttempts)
     )
       return exhaustWritableResult();
     // The root adapter revalidates the frozen native policy and exact read-only
     // filesystem authority. Custom writable authority remains separately pinned.
     await runtime.adapters.worker.probe({ access: "read-only" });
-    await transition({
-      ...state(),
-      writableResult: {
-        ...pending,
-        stage: "correcting",
-        attempts: pending.attempts + 1,
-      },
-    });
+    if (!retryReady)
+      await transition({
+        ...state(),
+        writableResult: beginWritableRestatement(pending, currentRun.revision),
+      });
     const schema =
       pending.phase === "IMPLEMENT"
         ? IMPLEMENTATION_SCHEMA
         : FINDING_RECOVERY_SCHEMA;
+    const roleCheckpoint = `commit:${pending.step}`;
     try {
       const output = await runRole(
         "worker",
@@ -5780,13 +6271,19 @@ ${plannedStepContext(step)}${
           `${WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS}\n\n${prefinalizationTrustedCommands()}\n\n${evidence}\n\nOriginal turn facts (runner data):\n${JSON.stringify(state().writableResult)}\n\nImplementation rework direction:\n${JSON.stringify(state().implementationDirection)}\n\n${plannedStepContext(planStep())}`,
         {
           access: "read-only",
-          checkpoint: `commit:${pending.step}`,
+          checkpoint: roleCheckpoint,
           recoveryContext: resolvedContext(),
           resultRestatement: true,
+          continueEpisode: true,
+          verifyCandidateScope: verifyRestatementValidationScope,
         },
       );
       if (output === null) return false;
-      return await acceptWritableOutput(output, schema);
+      return await acceptWritableOutput(
+        output,
+        schema,
+        verifyRestatementValidationScope,
+      );
     } catch (cause) {
       if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") throw cause;
       return exhaustWritableResult(cause);
@@ -5851,7 +6348,11 @@ ${plannedStepContext(step)}${
     });
   }
 
-  async function acceptImplementationResult(result, customCandidate) {
+  async function acceptImplementationResult(
+    result,
+    customCandidate,
+    inspectedFingerprint,
+  ) {
     const current = state();
     const checkpoint = current.writableResult;
     const correction = checkpoint.rework;
@@ -5862,7 +6363,7 @@ ${plannedStepContext(step)}${
       !evidence.accepted &&
       !stepPolicy.acceptsInitialResult(
         evidence.contentFingerprint,
-        await contentFingerprint(),
+        inspectedFingerprint,
       )
     ) {
       return pauseForImplementationEvidence(
@@ -6495,7 +6996,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       0,
       MAX_DIAGNOSTIC_ITEMS,
     );
-    const current = state();
+    const { catalogReviewInfrastructureFingerprint: _, ...current } = state();
     const existing =
       current.pendingLazyCorrection ?? lazyCorrectionAttempt(scope) ?? null;
     const correction = {
@@ -6513,8 +7014,8 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     ) {
       await transition(
         {
-          ...state(),
-          lazyCorrections: [...state().lazyCorrections, correction],
+          ...current,
+          lazyCorrections: [...current.lazyCorrections, correction],
           pendingLazyCorrection: correction,
         },
         {
@@ -6532,12 +7033,12 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     await transition(
       {
-        ...state(),
+        ...current,
         workflowState: "WAITING_FOR_USER",
         lazyCorrections:
           existing === null
-            ? [...state().lazyCorrections, correction]
-            : state().lazyCorrections,
+            ? [...current.lazyCorrections, correction]
+            : current.lazyCorrections,
         pendingLazyCorrection: correction,
       },
       {
@@ -6641,10 +7142,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               beforeFingerprint = await contentFingerprint();
               alreadyCharged ||= state().availabilityCorrectionCharged;
             },
-            checkpoint:
-              correction === null
-                ? `${combinedReview(current.settings) ? "primary" : "lazy-commit"}:${current.currentStep}`
-                : `lazy-correction:${current.currentStep}:check-and-fix`,
+            checkpoint: candidateCheckCheckpoint(current),
             freshSession: correction !== null,
             recoveryContext: resolvedContext(),
           },
@@ -6796,6 +7294,39 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         await validationInfrastructureFingerprint(
           current.validationInfrastructure,
         );
+      const roleCheckpoint = candidateCleanCheckpoint(current);
+      const savedInfrastructure =
+        current.catalogReviewInfrastructureFingerprint;
+      const catalogBound =
+        savedInfrastructure !== undefined ||
+        runtime.catalogRetry?.resuming(
+          "worker",
+          `clean-confirm:read-only:${roleCheckpoint}`,
+        );
+      // A legacy retry can use the scope of an existing correction.
+      const catalogInfrastructure =
+        savedInfrastructure ?? correction?.validationInfrastructureFingerprint;
+      async function verifyCatalogScope(fingerprint) {
+        if (fingerprint === undefined) {
+          if (!(await verifyFinalizationGuidance())) return false;
+          fingerprint = await validationInfrastructureFingerprint(
+            current.validationInfrastructure,
+          );
+        }
+        if (fingerprint === catalogInfrastructure) return true;
+        await pause(
+          "unsafe_git_state",
+          { code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED" },
+          clearedTerminalGate(),
+          { nextActiveTurn: null },
+        );
+        return false;
+      }
+      if (
+        catalogBound &&
+        !(await verifyCatalogScope(inspectedValidationFingerprint))
+      )
+        return false;
       const scope =
         correction ??
         lazyCorrectionScope(
@@ -6845,10 +7376,11 @@ Inspected candidate fingerprint: ${inspectedFingerprint}
 Previous candidate-confirmation findings for this step:
 ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : current.previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
-            checkpoint:
-              correction === null
-                ? `candidate:${current.currentStep}`
-                : `lazy-correction:${current.currentStep}:clean-confirm`,
+            checkpoint: roleCheckpoint,
+            candidateInfrastructureFingerprint: inspectedValidationFingerprint,
+            verifyCandidateScope: catalogBound
+              ? () => verifyCatalogScope()
+              : undefined,
             freshSession: correction !== null,
             recoveryContext: resolvedContext(),
           },
@@ -6874,7 +7406,9 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
           });
           return false;
         }
+        if (catalogBound && !(await verifyCatalogScope())) return false;
         if (
+          !catalogBound &&
           correction !== null &&
           (await validationInfrastructureFingerprint(
             current.validationInfrastructure,
@@ -6986,6 +7520,12 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
         );
         return true;
       } catch (cause) {
+        if (
+          catalogBound &&
+          cause?.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+          !(await verifyCatalogScope())
+        )
+          return false;
         const resolution = await handleInvalidLazyOutput(cause, context, scope);
         if (resolution === "retry") {
           continue;
@@ -7025,13 +7565,12 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
             correction.validationInfrastructureFingerprint !==
               inspectedValidationFingerprint))
       ) {
-        await restartFinalizationAfterConfirmationDrift(
+        return handleConfirmationScopeDrift(
           current,
           correction === null
             ? "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED"
             : "ERR_CONFIRMATION_CORRECTION_SCOPE_CHANGED",
         );
-        return true;
       }
       try {
         const output = await runRole(
@@ -7085,11 +7624,10 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           return false;
         }
         if (confirmedValidationFingerprint !== inspectedValidationFingerprint) {
-          await restartFinalizationAfterConfirmationDrift(
+          return handleConfirmationScopeDrift(
             state(),
             "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
           );
-          return true;
         }
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "IMPLEMENT");
@@ -7237,7 +7775,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
     const step = planStep();
     const context = reviewOutputContext();
 
-    async function verifiedCandidateScope() {
+    async function verifiedCandidateScope(catalogScope = null) {
       const current = state();
       try {
         await safety.assertUnchanged(current.repositoryBaseline);
@@ -7258,11 +7796,47 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
         });
         return null;
       }
-      const correctionScope = await reviewCorrectionScope(current, fingerprint);
       if (
+        catalogScope !== null &&
+        current.finalizationGuidance?.selection === "file" &&
+        !(await verifyFinalizationGuidance())
+      )
+        return null;
+      const correctionScope = await reviewCorrectionScope(current, fingerprint);
+      const correctionDrifted =
         current.reviewCorrection !== null &&
-        !reviewCorrectionMatchesScope(current.reviewCorrection, correctionScope)
+        !reviewCorrectionMatchesScope(
+          current.reviewCorrection,
+          correctionScope,
+        );
+      const savedInfrastructure =
+        current.catalogReviewInfrastructureFingerprint;
+      const catalogResuming = runtime.catalogRetry?.resuming(
+        "reviewer",
+        `review:read-only:${candidateReviewCheckpoint(current)}`,
+      );
+      const catalogBound = catalogResuming || savedInfrastructure !== undefined;
+      // Older catalog pauses can prove the scope of an existing correction.
+      const catalogInfrastructure =
+        savedInfrastructure ??
+        current.reviewCorrection?.validationInfrastructureFingerprint;
+      if (
+        (catalogScope !== null &&
+          !reviewCorrectionMatchesScope(catalogScope, correctionScope)) ||
+        (catalogBound &&
+          (correctionDrifted ||
+            catalogInfrastructure !==
+              correctionScope.validationInfrastructureFingerprint))
       ) {
+        await pause(
+          "unsafe_git_state",
+          { code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED" },
+          {},
+          { nextActiveTurn: null },
+        );
+        return null;
+      }
+      if (correctionDrifted) {
         await transition({
           ...current,
           ...clearedTerminalGate(),
@@ -7272,7 +7846,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           pendingReviewCorrection: null,
         });
       }
-      return Object.freeze({ correctionScope, fingerprint });
+      return Object.freeze({ correctionScope, fingerprint, catalogBound });
     }
 
     function candidateReviewPrompt(evidence, correction) {
@@ -7312,16 +7886,23 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
       }
       const current = state();
       const correction = current.pendingReviewCorrection;
+      const checkpoint = candidateReviewCheckpoint(current);
+      // Keep the inspected scope after the retry is claimed and across
+      // recovery of an interrupted review.
+      const catalogScope = scope.catalogBound ? scope.correctionScope : null;
       try {
         const output = await runRole(
           "reviewer",
           CANDIDATE_REVIEW_SCHEMA,
           (evidence) => candidateReviewPrompt(evidence, correction),
           {
-            checkpoint:
-              correction === null
-                ? `commit:${current.currentStep}`
-                : `candidate-review-correction:${current.currentStep}`,
+            checkpoint,
+            candidateInfrastructureFingerprint:
+              scope.correctionScope.validationInfrastructureFingerprint,
+            verifyCandidateScope:
+              catalogScope === null
+                ? undefined
+                : () => verifiedCandidateScope(catalogScope),
             freshSession: correction !== null,
             recoveryContext: resolvedContext(),
           },
@@ -7333,7 +7914,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           output,
           reviewFindingHistory(current),
         );
-        scope = await verifiedCandidateScope();
+        scope = await verifiedCandidateScope(catalogScope);
         if (scope === null) {
           return false;
         }
@@ -7345,6 +7926,11 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         ) {
           throw cause;
         }
+        if (
+          catalogScope !== null &&
+          !(await verifiedCandidateScope(catalogScope))
+        )
+          return false;
         const diagnostics = outputDiagnostics(cause, context).slice(
           0,
           MAX_DIAGNOSTIC_ITEMS,
@@ -7542,11 +8128,11 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         infrastructureFingerprint !==
         current.finalizationResult.validationInfrastructureFingerprint
       ) {
-        await restartFinalizationAfterConfirmationDrift(
+        const restarted = await handleConfirmationScopeDrift(
           current,
           "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
         );
-        return { restartFinalization: true };
+        return restarted ? { restartFinalization: true } : null;
       }
       const correctionScope = confirmationCorrectionScope(current);
       if (
@@ -7556,11 +8142,11 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           correctionScope,
         )
       ) {
-        await restartFinalizationAfterConfirmationDrift(
+        const restarted = await handleConfirmationScopeDrift(
           current,
           "ERR_CONFIRMATION_CORRECTION_SCOPE_CHANGED",
         );
-        return { restartFinalization: true };
+        return restarted ? { restartFinalization: true } : null;
       }
       return Object.freeze({ correctionScope, fingerprint });
     }
@@ -8288,7 +8874,11 @@ ${JSON.stringify(
     );
   }
 
-  async function acceptResolutionResult(result, customCandidate) {
+  async function acceptResolutionResult(
+    result,
+    customCandidate,
+    inspectedFingerprint,
+  ) {
     const current = state();
     const workReports = retainWorkReport(current.workReports, {
       step: current.currentStep,
@@ -8342,7 +8932,7 @@ ${JSON.stringify(
       return false;
     }
     const changed =
-      (await contentFingerprint()) !== beforeFingerprint ||
+      inspectedFingerprint !== beforeFingerprint ||
       (custom && !isDeepStrictEqual(customCandidate, current.customCandidate));
     const declaredFix = result.decisions.some(
       ({ decision }) => decision === "FIX",
@@ -8573,6 +9163,9 @@ ${JSON.stringify(
     const step = planStep();
     let pendingCommit = current.pendingCommit;
     const availabilityCheckpoint = `commit:${current.currentStep}`;
+    const catalogResume =
+      pendingCommit?.status !== "consumed" &&
+      runtime.catalogRetry?.claimResume("worker", availabilityCheckpoint);
     if (
       pendingCommit?.status !== "consumed" &&
       currentRun.availabilityRetry != null &&
@@ -8599,6 +9192,7 @@ ${JSON.stringify(
         role: "worker",
         checkpoint: availabilityCheckpoint,
         repository: current.repositoryBaseline,
+        continueEpisode: catalogResume,
       });
     }
 
@@ -8765,7 +9359,11 @@ ${step.subject}`),
           ? {}
           : { session: { id: previousSession, mode: "continue" } }),
       };
-      currentRun = await runtime.startAgentTurn(commitTurn);
+      if (catalogResume) dispositionPausePersistence = true;
+      currentRun = await runtime.startAgentTurn(commitTurn, {
+        ...(catalogResume ? { catalogCheckpoint: availabilityCheckpoint } : {}),
+      });
+      if (catalogResume) dispositionPausePersistence = false;
       assertRun(currentRun);
       commitTurnNeedsReconciliation = true;
       try {
@@ -8773,6 +9371,11 @@ ${step.subject}`),
       } catch (cause) {
         agentError = cause;
       }
+      const catalogProof =
+        runtime.catalogRetry?.eligible(agentError) === true
+          ? { effect: "none", commitExecutor: "not_started" }
+          : null;
+      const catalogMiss = isCatalogCommitRejection(agentError);
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
       const outputExhaustion = runtime.outputExhaustion?.preEffect(agentError);
@@ -8784,6 +9387,7 @@ ${step.subject}`),
           : undefined;
       const preEffectRejection =
         agentError?.effectStarted === false &&
+        (!catalogMiss || catalogProof !== null) &&
         (runtime.outputExhaustion?.eligible(agentError) !== true ||
           outputExhaustion != null)
           ? Object.freeze({
@@ -8797,7 +9401,11 @@ ${step.subject}`),
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
               ...(outputExhaustion == null ? {} : { outputExhaustion }),
-              ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+              ...(catalogProof !== null
+                ? { catalog: catalogProof }
+                : diagnosticClass === undefined
+                  ? {}
+                  : { diagnosticClass }),
             })
           : null;
       pendingCommit = {
@@ -8837,7 +9445,10 @@ ${step.subject}`),
       if (
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
         cause.changes?.includes("index") !== true &&
-        pendingCommit.preEffectRejection !== null
+        pendingCommit.preEffectRejection !== null &&
+        (!isCatalogCommitRejection(pendingCommit.preEffectRejection) ||
+          (pendingCommit.preEffectRejection.catalog !== undefined &&
+            cause.changes?.length === 0))
       ) {
         if (
           pendingCommit.preEffectRejection.code === "ERR_PROVIDER_INACTIVE" &&
@@ -9136,16 +9747,27 @@ ${step.subject}`),
       return currentRun;
     }
     if (operatorStop) {
-      if (state().pendingCommit?.status === "consumed") {
+      if (
+        interruptedTurn === null &&
+        currentRun.pause?.reason === "unsafe_git_state" &&
+        currentRun.pause.code === CATALOG_WORKSPACE_CHANGED
+      )
+        return currentRun;
+      const pendingCommit = state().pendingCommit;
+      if (pendingCommit?.status === "consumed") {
+        const rejection = operatorStopPreEffectRejection?.rejection;
         if (
-          operatorStopPreEffectRejection !== null &&
-          state().pendingCommit.preEffectRejection === null
+          rejection != null &&
+          operatorStopPreEffectRejection?.authorizationId ===
+            pendingCommit.authorization.id &&
+          !isCatalogCommitRejection(rejection) &&
+          pendingCommit.preEffectRejection === null
         ) {
           await transition({
             ...state(),
             pendingCommit: {
-              ...state().pendingCommit,
-              preEffectRejection: operatorStopPreEffectRejection,
+              ...pendingCommit,
+              preEffectRejection: rejection,
             },
           });
         }
@@ -9160,14 +9782,29 @@ ${step.subject}`),
           const inspected = await safety.reconcileInterrupted(
             state().repositoryBaseline,
             {
-              allowWorkspaceChanges: original && !checkpoint.budgetExhausted,
+              allowWorkspaceChanges:
+                original &&
+                !checkpoint.budgetExhausted &&
+                !interruptedWritableNoEffect,
               allowIndexChanges: false,
             },
           );
           if (original) await reconcileWritableResult(inspected);
-          writableCheckpointPersistence = true;
-          currentRun = await runtime.finishAgentTurn(interruptedTurn);
-          writableCheckpointPersistence = false;
+          if (!original && (await stopCatalogRestatement())) return currentRun;
+          const recovery = currentRun.inactivityRecovery;
+          if (
+            recovery?.expiryRevision <
+              currentRun.stopRequest?.acceptedRevision &&
+            hasInterruptedRestatementExpiry(checkpoint, inspected)
+          ) {
+            await publishRestatementInactivity(recovery.attempt === 1, {
+              stopping: true,
+            });
+          } else {
+            writableCheckpointPersistence = true;
+            currentRun = await runtime.finishAgentTurn(interruptedTurn);
+            writableCheckpointPersistence = false;
+          }
           interruptedTurn = null;
         } else {
           if (
@@ -9192,7 +9829,7 @@ ${step.subject}`),
         const inspected = await safety.reconcileInterrupted(
           current.repositoryBaseline,
           {
-            allowWorkspaceChanges: writable,
+            allowWorkspaceChanges: writable && !interruptedWritableNoEffect,
             allowIndexChanges: false,
           },
         );
@@ -9261,6 +9898,12 @@ ${step.subject}`),
       !(await settleWritableProductDecision())
     )
       return currentRun;
+    if (
+      currentRun.pause?.reason === "commit_failed" &&
+      state().pendingCommit === null &&
+      isNonRetryableCommitModelRejection(currentRun.pause)
+    )
+      return currentRun;
     if (state().writableResult === null) {
       await prepareScopedDiscovery();
       await prepareCapabilityDiscovery();
@@ -9288,8 +9931,7 @@ ${step.subject}`),
         currentRun.pause.reason === "commit_failed" &&
         (state().pendingCommit?.status === "consumed" ||
           (state().pendingCommit === null &&
-            commitReadinessConstraint(currentRun.pause.diagnosticClass) ===
-              null &&
+            !isNonRetryableCommitRejection(currentRun.pause) &&
             currentRun.pause.resumeState === "COMMIT"))
       ) {
         await transition(
@@ -9325,15 +9967,42 @@ ${step.subject}`),
               "COMMIT",
             ].includes(currentRun.pause.resumeState)))
       ) {
+        dispositionPausePersistence =
+          currentRun.modelCatalogResume != null ||
+          (currentRun.pause.code !== undefined &&
+            currentRun.pause.code === runtime.catalogRetry?.code);
+        const pending = state().writableResult;
+        const retryRestatement =
+          pending?.stage === "correcting" &&
+          pending.phase === currentRun.pause.resumeState &&
+          (currentRun.pause.reason === "authentication_required" ||
+            (currentRun.pause.reason === "output_exhausted" &&
+              currentRun.pause.checkpoint ===
+                `writable-result:read-only:commit:${pending.step}`));
+        if (
+          retryRestatement &&
+          pending.restatementValidationFingerprint !== undefined &&
+          !(await verifyRestatementValidationScope())
+        )
+          return currentRun;
         await transition(
           {
             ...state(),
             workflowState: state().preflightComplete
               ? currentRun.pause.resumeState
               : "CLARIFY",
+            ...(retryRestatement
+              ? {
+                  writableResult: {
+                    ...pending,
+                    stage: "retry-ready",
+                  },
+                }
+              : {}),
           },
           { pause: null },
         );
+        dispositionPausePersistence = false;
       } else {
         return currentRun;
       }
@@ -9801,6 +10470,13 @@ ${step.subject}`),
       });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+      if (interruptedWritableNoEffect && interruptedTurn === run.activeTurn)
+        return pause(
+          "unsafe_git_state",
+          { code: CATALOG_WORKSPACE_CHANGED },
+          {},
+          { nextActiveTurn: null },
+        );
       const snapshotChanges = readOnlySnapshotChanges(safety, cause);
       return invalidateInputs("read_only_agent_mutated_repository", {
         code: cause.code,
@@ -9866,6 +10542,7 @@ function isOwnershipFailure(cause) {
     [
       "ERR_EXECUTION_PROCESS_ACTIVE",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
       "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
     ].includes(cause?.code)
   );

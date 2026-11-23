@@ -639,8 +639,20 @@ export async function customExecutionFixture(
       return Object.fromEntries(entries);
     },
     transition,
-    startAgentTurn: (activeTurn, patch = {}) =>
-      transition({ ...patch, activeTurn }),
+    startAgentTurn: (
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) => {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? memoryRun.pipelineState,
+          memoryRun.revision,
+        ) ?? pipelineState;
+      return transition({
+        ...(pipelineState === undefined ? {} : { pipelineState }),
+        activeTurn,
+      });
+    },
     finishAgentTurn: () => transition({ activeTurn: null }),
     recordChildSession: (child) =>
       transition({

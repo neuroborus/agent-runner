@@ -2394,6 +2394,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
   });
   const launchCounts = new Map();
   const children = [];
+  let firstLosingChild;
   let firstStartCount = 0;
 
   function launchRun(runId, _action, options) {
@@ -2450,6 +2451,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
       }
     })();
     children.push(child);
+    if (runId === SECOND_RUN_ID && attempt === 1) firstLosingChild = child;
   }
 
   const commonInput = {
@@ -2506,6 +2508,8 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
   });
   assert.equal(launchCounts.get(RUN_ID), 1);
 
+  // A control-plane rejection can arrive before the child has tested the lease.
+  await firstLosingChild;
   releaseWinner.resolve();
   await Promise.all(children.slice(0, 2));
 

@@ -25,6 +25,7 @@ test("legacy confirmation proof crosses authentic persisted migration history", 
     for (const event of events) {
       delete event.state.pipelineState.pendingClarificationAppend;
       delete event.state.pipelineState.clarificationRoot;
+      delete event.state.pipelineState.validationMigrationDisagreement;
       event.state.pipelineState.planContextVersion = 0;
       event.state.pipelineState.stepImplementation = null;
       event.state.pipelineState.implementationEvidenceLegacy = true;
@@ -86,6 +87,7 @@ test("legacy confirmation proof crosses authentic persisted migration history", 
     "confirmationCorrection",
     "pendingConfirmationCorrection",
     "finalizationRecovery",
+    "validationMigrationDisagreement",
   ])
     delete unproven.pipelineState[field];
   unproven.revision = 1;

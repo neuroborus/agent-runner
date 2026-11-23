@@ -216,6 +216,101 @@ cross-capability lifecycle retain the affected [slow owners](slow-gates.md) and 
 slow release gate; focused development cases do not attest those gates or the
 separate package-install requirement.
 
+## Explicit-model catalog recovery
+
+Catalog recovery coverage uses an injected App Server for lookup and effect
+classification, state persistence for exact receipt binding and migration, and
+a memory Git fixture for the implementation reservation, first-use no-effect drift,
+and legacy CLI/MCP projections. [Provider coverage](providers.md#explicit-model-catalog-misses)
+owns adapter classification and [state coverage](state.md#explicit-model-catalog-recovery)
+owns receipt, admission and replay binding.
+Init coverage rebuilds the same logical read-only reservation after temporary
+inspection failure and owner loss.
+Both coding pipelines require a writable catalog pause to carry a no-effect
+rejection bound to the failed provider attempt for the current invocation.
+Read-only review and confirmation pauses reject a completed-only, generic,
+mismatched or other-phase attempt and replaced hashes, counters or reservation
+in the first pause, and require the current invocation's recorded rejection.
+A later review miss cannot replace the captured infrastructure fingerprint, and
+no review pause, resume or retry start can drop accepted work reports or prior
+finding decisions or, in plan execution, replace custom criterion evidence.
+The regressions reject a generic failure at the matching checkpoint, a
+completed attempt even if another failure follows, another checkpoint and a
+failure with possible effects. They recover the exact checkpoint after a valid
+miss. Cold resume and stop regressions preserve both pipelines' original baselines,
+reservations, and counters on drift after a recorded no-effect rejection.
+A previous attempt at the same checkpoint cannot guard a later turn.
+The read-only restatement regressions reject generic, stale or mismatched
+attempts and preserve the candidate, frozen inputs, consumed reservation and
+recovery accounting from the first catalog pause through dispatch.
+Both coding pipelines pause on live validation-infrastructure drift before
+dispatching a saved candidate-review correction, preserving it and its allowance.
+Fast regressions also cover retained audit reservations
+and read-only restatement continuations after authentication,
+output exhaustion, availability backoff and inactivity. They cover lost
+acknowledgements when both coding pipelines resume a catalog retry after an
+environment pause and when polishing publishes or retires a reconciled finding
+resolution, including a no-effect miss with spent reconstruction. Both coding
+pipelines reject validation-infrastructure drift on initial candidate-review
+catalog retry before dispatch, during settlement, and after owner loss, with
+unchanged Git content.
+The same integration suite covers initial candidate clean confirmation with
+ignored infrastructure drift during the pause, before provider invocation, and
+during the retried turn. It also covers the independent candidate review
+inspecting its own scope after the Worker settles a catalog retry.
+Plan execution
+also covers a catalog miss during validation-migration Arbiter correction,
+reloading the same disagreement and correction without repeating reconciliation.
+Polishing covers owner loss after resume acceptance in the saved migration
+phase. Plan-execution cold recovery distinguishes
+the current restatement's journaled expiry from a stale expiry, and tests both
+remaining and spent reconstruction allowances.
+Version-27 coverage also tests recovery of the missing invocation marker across
+the writable-result migration, with stale and mismatched expiries rejected.
+Both coding pipelines also verify those distinctions when a pause is accepted
+after the expiry and before turn settlement.
+The Runner inactivity regression preserves that failed-attempt evidence when
+a distinct availability failure races watchdog expiry.
+Plan-execution stop settlement also verifies an expiry from an intentionally
+retained provider episode.
+Plan execution preserves the allowance across authentication with stale expiry evidence
+and recovers after a lost acknowledgement of reconstruction authorization.
+The catalog-resume reconstruction regression reloads a retained first expiry,
+requires the current provider observation, and rejects replay against the
+pre-reconciliation fingerprint. A native fresh request consumes the allowance
+once without replacing the read-only reservation.
+Both coding pipelines cover the advertised exhaustion pause and subsequent
+read-only retry after a catalog miss during a continued repair with a spent
+restatement allowance.
+Polishing covers a first watchdog expiry racing a no-effect catalog miss with
+the ready acknowledgement lost; cold recovery keeps the unspent reconstruction.
+Polishing recovery covers loss before and after atomic backoff publication,
+after terminal rejection retires the turn, and with current or stale watchdog
+expiry evidence, including lost acknowledgements of first-expiry retirement
+and reconstruction authorization. A live reconciled-turn retry rejects an expiry
+that predates the restatement marker or observed other content. It also covers
+live inactivity exhaustion and retained availability backoff after output
+exhaustion, with loss of the resume
+acknowledgement before either continuation starts.
+Authentication retires backoff and inactivity preserves the consumed attempt.
+Legacy polishing fixtures migrate common version 27 and polishing version 24
+together. Journal replay resumes the existing backoff after its bound
+restatement retired and rejects it after a later invocation. Watchdog recovery
+uses the certified provider attempt during cold resume and operator-stop
+settlement, and rejects stale or mismatched expiry.
+Runner orchestration covers
+completion and source-fork eligibility.
+Runner effects covers cold restatement and retained provider episodes,
+including backoff progression after narrative reconstruction. It verifies that
+configuration drift after a proven no-effect miss preserves the original
+writable reservation in either coding pipeline. It also distinguishes a
+journaled model receipt with a lost acknowledgement from an unconfirmed receipt
+that requires read-only recovery of completed writes.
+Runner operator stops covers the race before commit proof publication, including
+a later catalog miss after a pre-executor availability retry. It also protects
+the original candidate when stop interrupts a proven no-effect writable miss
+in either coding pipeline.
+
 ## Audit composition
 
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
@@ -516,9 +611,11 @@ their public boundaries; no rejected payload enters the finite diagnosis.
 Fast `pipelines/init/test/inspection-failure.test.js` owns finite inspection
 constraints, complete over-capacity document rejection, redaction, strict pause
 validation, trusted bounded-file constraint mapping and narrow transient recovery
-policy, without filesystem/provider work. Clarification lifecycle coverage checks
-the existing transcript-size guard's constraint; configuration loading coverage
-checks the regular-file guard while preserving its existing read-error code.
+policy, without filesystem/provider work. It rejects clarification drift both at
+an init catalog pause and after durable resume acceptance. Clarification
+lifecycle coverage checks the existing transcript-size guard's constraint;
+configuration loading coverage checks the regular-file guard while preserving
+its existing read-error code.
 
 Fast `test/workspace/setup-proof.test.js` constructs complete snapshots beyond
 10,000 entries to prove compact persistence, exact publication allowances,

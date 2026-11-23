@@ -675,6 +675,13 @@ restart do not reset it. Safe partial
 content and pending corrections survive; stale approvals are invalidated and the
 same correction is not charged again. Source forks are never replayed. An
 abortable wait retains exclusive ownership and honors immediate/deferred stops.
+A qualifying explicit-model catalog miss pauses at the current read-only
+checkpoint as `backend_unavailable`. Resume reconstructs the same frozen
+request without a source refork or changes to the draft and review budgets.
+Admission and journal replay preserve the saved authoring state and counters
+from resume acceptance through the matching turn start.
+See the [catalog recovery contract](../../../docs/ARCHITECTURE.md#explicit-model-catalog-recovery).
+
 See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 The root agent boundary normalizes those finite adapter-owned classes before
 workflow code sees the failure. In particular, Codex collaboration activity

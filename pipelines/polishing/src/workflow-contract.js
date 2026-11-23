@@ -2914,6 +2914,596 @@ export const INTERRUPTED_RESOLUTION_DIAGNOSTIC = Object.freeze({
   field: "result",
   constraint: "interrupted-response",
 });
+export const CATALOG_RESOLUTION_DIAGNOSTIC = Object.freeze({
+  field: "result",
+  constraint: "model-unavailable-during-recovery",
+});
+
+export function beginResolutionRestatement(checkpoint) {
+  return {
+    ...checkpoint,
+    stage: "correcting",
+    attempts: checkpoint.attempts + 1,
+    diagnostics:
+      checkpoint.diagnostics.length === 0
+        ? [INTERRUPTED_RESOLUTION_DIAGNOSTIC]
+        : checkpoint.diagnostics,
+  };
+}
+
+export function originalResolutionCheckpoint(correction) {
+  return `resolve-findings:${correction.access}:work`;
+}
+
+function observedResolutionRestatementCheckpoint(run, correction) {
+  const original = originalResolutionCheckpoint(correction);
+  return [run.availabilityRetry, run.inactivityRecovery].some(
+    (recovery) =>
+      recovery?.role === "worker" && recovery.checkpoint === original,
+  )
+    ? original
+    : RESOLUTION_CORRECTION_CHECKPOINT;
+}
+
+export function matchesResolutionAvailabilityRetirement(
+  previous,
+  next,
+  activeTurnStart,
+) {
+  const state = previous.pipelineState;
+  const correction = state.resolutionCorrection;
+  const episode = next.availabilityRetry;
+  if (
+    previous.activeTurn?.role !== "worker" ||
+    previous.activeTurn.phase !== "resolve-findings" ||
+    episode.role !== "worker" ||
+    state.workflowState !== "RESOLVE_FINDINGS" ||
+    correction?.stage !== "correcting" ||
+    !["workspace-write", "read-only"].includes(correction.access) ||
+    correction.productDecision !== null ||
+    !Number.isSafeInteger(correction.attempts) ||
+    correction.attempts < 1 ||
+    correction.attempts !== correction.additionalAttempts + 1 ||
+    activeTurnStart?.pipelineState == null ||
+    correction.restatementStartedAfter !== activeTurnStart.previousRevision ||
+    activeTurnStart.pipelineState.workflowState !== state.workflowState ||
+    !isDeepStrictEqual(
+      correction,
+      activeTurnStart.pipelineState.resolutionCorrection,
+    ) ||
+    !isDeepStrictEqual(
+      state.repositoryBaseline,
+      activeTurnStart.pipelineState.repositoryBaseline,
+    ) ||
+    episode.contentFingerprint !==
+      state.repositoryBaseline?.contentFingerprint ||
+    episode.contentFingerprint !== correction.candidate?.contentFingerprint
+  )
+    return false;
+
+  return (
+    episode.checkpoint ===
+      observedResolutionRestatementCheckpoint(previous, correction) &&
+    isDeepStrictEqual(next.pipelineState, state)
+  );
+}
+
+// A catalog retry of the report belongs to the read-only restatement. The
+// original access stays on the reservation as historical effect evidence.
+export function matchesResolutionRestatementCatalogAttempt(
+  run,
+  binding,
+  turnStart,
+  attempt,
+) {
+  const { pipelineState: state } = run;
+  const correction = state.resolutionCorrection;
+  return (
+    run.activeTurn?.role === "worker" &&
+    run.activeTurn.phase === "resolve-findings" &&
+    binding.role === "worker" &&
+    binding.checkpoint === RESOLUTION_CORRECTION_CHECKPOINT &&
+    state.workflowState === binding.resumeState &&
+    correction?.stage === "correcting" &&
+    correction.productDecision === null &&
+    correction.attempts === correction.additionalAttempts + 1 &&
+    attempt?.role === binding.role &&
+    attempt.checkpoint ===
+      observedResolutionRestatementCheckpoint(run, correction) &&
+    turnStart?.pipelineState != null &&
+    (turnStart.catalogCheckpoint === undefined ||
+      turnStart.catalogCheckpoint === binding.checkpoint) &&
+    correction.restatementStartedAfter === turnStart.previousRevision &&
+    isDeepStrictEqual(state, turnStart.pipelineState)
+  );
+}
+
+export function assertRestatementCatalogPause(
+  previous,
+  next,
+  retryCode,
+  turnStart,
+  attempt,
+  writableAttempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    pause.checkpoint !== RESOLUTION_CORRECTION_CHECKPOINT ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+
+  const state = previous.pipelineState;
+  const correction = state.resolutionCorrection;
+  const originalAttempt =
+    correction?.access === "read-only" ? attempt : writableAttempt;
+  // Reconciliation of the original report can publish an unconsumed
+  // reservation. An already started read-only restatement is different.
+  if (
+    turnStart?.pipelineState?.resolutionCorrection?.stage !== "correcting" &&
+    previous.activeTurn?.phase === "resolve-findings" &&
+    correction?.stage === "ready" &&
+    originalAttempt?.role === pause.role &&
+    originalAttempt.checkpoint === originalResolutionCheckpoint(correction) &&
+    (turnStart?.catalogCheckpoint === undefined ||
+      turnStart.catalogCheckpoint === originalAttempt.checkpoint) &&
+    next.pipelineState.resolutionCorrection?.stage === "ready" &&
+    matchesResolutionCatalogReservation(previous, next, pause)
+  )
+    return true;
+
+  if (
+    pause.reason !== "backend_unavailable" ||
+    previous.pause !== null ||
+    next.activeTurn !== null ||
+    next.pipelineState.workflowState !== "WAITING_FOR_USER" ||
+    !matchesResolutionRestatementCatalogAttempt(
+      previous,
+      pause,
+      turnStart,
+      attempt,
+    ) ||
+    !matchesResolutionCatalogReservation(previous, next, pause) ||
+    !isDeepStrictEqual(correction, next.pipelineState.resolutionCorrection)
+  )
+    throw new Error(
+      "Catalog pause has no verified read-only restatement retirement.",
+    );
+  return true;
+}
+
+export function matchesResolutionCatalogReservation(
+  previous,
+  next,
+  { role, checkpoint, resumeState },
+) {
+  if (checkpoint !== RESOLUTION_CORRECTION_CHECKPOINT) return undefined;
+
+  const before = previous.pipelineState.resolutionCorrection;
+  const after = next.pipelineState.resolutionCorrection;
+  if (
+    role !== "worker" ||
+    resumeState !== "RESOLVE_FINDINGS" ||
+    !["ready", "correcting"].includes(before?.stage) ||
+    before.productDecision !== null ||
+    !["workspace-write", "read-only"].includes(before.access) ||
+    !isDeepStrictEqual(previous.hashes, next.hashes) ||
+    !isDeepStrictEqual(previous.counters, next.counters) ||
+    !isDeepStrictEqual(previous.availabilityRetry, next.availabilityRetry) ||
+    !isDeepStrictEqual(previous.inactivityRecovery, next.inactivityRecovery)
+  )
+    return false;
+
+  if (next.activeTurn !== null) {
+    return (
+      before.stage === "correcting" &&
+      next.pipelineState.workflowState === resumeState &&
+      after?.restatementStartedAfter === previous.revision &&
+      isDeepStrictEqual(next.pipelineState, {
+        ...previous.pipelineState,
+        resolutionCorrection: {
+          ...before,
+          restatementStartedAfter: after.restatementStartedAfter,
+        },
+      })
+    );
+  }
+
+  return (
+    isDeepStrictEqual(next.pipelineState, {
+      ...previous.pipelineState,
+      workflowState: next.pipelineState.workflowState,
+      resolutionCorrection: after,
+    }) &&
+    (isDeepStrictEqual(before, after) ||
+      (before.stage === "ready" &&
+        before.attempts < before.additionalAttempts + 1 &&
+        Array.isArray(before.diagnostics) &&
+        isDeepStrictEqual(after, beginResolutionRestatement(before))))
+  );
+}
+
+const CANDIDATE_REVIEW_CORRECTION = "candidate-review-correction";
+const WRITABLE_RESOLUTION_CHECKPOINT = "resolve-findings:workspace-write:work";
+
+export function resolutionFixBudgetExhausted(
+  state,
+  fixRounds,
+  retryCheckpoint,
+) {
+  return (
+    retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
+    (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
+      true &&
+      !state.availabilityCorrectionCharged &&
+      fixRounds >= state.settings.maxFixRounds + state.additionalFixRounds)
+  );
+}
+
+export function candidateReviewCheckpoint(state) {
+  return state.pendingReviewCorrection === null
+    ? "review"
+    : CANDIDATE_REVIEW_CORRECTION;
+}
+
+export function candidateCleanCheckpoint(state) {
+  if (state.pendingLazyCorrection !== null)
+    return "lazy-correction:clean-confirm";
+  return combinedReview(state.settings) ? "primary-clean" : "work";
+}
+
+export function candidateCheckCheckpoint(state) {
+  if (state.pendingLazyCorrection !== null)
+    return "lazy-correction:check-and-fix";
+  return combinedReview(state.settings) ? "primary-check" : "work";
+}
+
+export function matchesGateCatalogReservation(previous, next, binding) {
+  const before = previous.pipelineState;
+  const after = next.pipelineState;
+  if (binding.checkpoint === WRITABLE_RESOLUTION_CHECKPOINT) {
+    const providerRetry =
+      previous.availabilityRetry ??
+      (previous.inactivityRecovery?.expiryRevision != null
+        ? previous.inactivityRecovery
+        : null);
+    return (
+      binding.role === "worker" &&
+      binding.resumeState === "RESOLVE_FINDINGS" &&
+      !polishingPolicy(before.settings).independentReview &&
+      before.resolutionCorrection === null &&
+      before.finalizationResult?.status === "FAIL" &&
+      !resolutionFixBudgetExhausted(
+        before,
+        normalizedCounters(previous.counters).fixRounds,
+        providerRetry?.checkpoint,
+      ) &&
+      (next.activeTurn === null ||
+        after.workflowState === "RESOLVE_FINDINGS") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  // Writable finalization keeps its candidate, inventory, correction scope and
+  // fix accounting from pause acceptance through dispatch.
+  if (binding.checkpoint.startsWith("finalize:workspace-write:")) {
+    return (
+      binding.role === "worker" &&
+      binding.resumeState === "FINALIZE" &&
+      binding.checkpoint === "finalize:workspace-write:work" &&
+      (next.activeTurn === null || after.workflowState === "FINALIZE") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  // POLISH keeps its candidate, pending correction and fix accounting.
+  if (binding.checkpoint.startsWith("polish:")) {
+    return (
+      binding.role === "worker" &&
+      binding.resumeState === "POLISH" &&
+      binding.checkpoint === "polish:workspace-write:work" &&
+      (next.activeTurn === null || after.workflowState === "POLISH") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  if (binding.checkpoint.startsWith("check-and-fix:")) {
+    return (
+      binding.role === "worker" &&
+      binding.resumeState === "CHECK_AND_FIX" &&
+      polishingPolicy(before.settings).primaryConvergence &&
+      binding.checkpoint ===
+        `check-and-fix:workspace-write:${candidateCheckCheckpoint(before)}` &&
+      (next.activeTurn === null || after.workflowState === "CHECK_AND_FIX") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  if (binding.checkpoint.startsWith("confirm:read-only:")) {
+    const confirmer = polishingPolicy(before.settings).terminalConfirmer;
+    const purpose =
+      before.pendingConfirmationCorrection != null
+        ? "confirmation-correction"
+        : confirmer === "worker"
+          ? "confirmation"
+          : "review";
+    return (
+      binding.role === confirmer &&
+      binding.resumeState === "CONFIRM" &&
+      binding.checkpoint === `confirm:read-only:${purpose}` &&
+      (next.activeTurn === null || after.workflowState === "CONFIRM") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  if (
+    /^clean-confirm:read-only:(?:primary-clean|work|lazy-correction:clean-confirm)$/u.test(
+      binding.checkpoint,
+    )
+  ) {
+    return (
+      binding.role === "worker" &&
+      binding.resumeState === "CLEAN_CONFIRM" &&
+      polishingPolicy(before.settings).primaryConvergence &&
+      binding.checkpoint ===
+        `clean-confirm:read-only:${candidateCleanCheckpoint(before)}` &&
+      (next.activeTurn === null || after.workflowState === "CLEAN_CONFIRM") &&
+      isDeepStrictEqual(after, {
+        ...before,
+        workflowState: after.workflowState,
+      }) &&
+      isDeepStrictEqual(previous.counters, next.counters)
+    );
+  }
+  if (
+    binding.checkpoint !== "review:read-only:review" &&
+    binding.checkpoint !== `review:read-only:${CANDIDATE_REVIEW_CORRECTION}`
+  )
+    return undefined;
+
+  return (
+    binding.role === "reviewer" &&
+    binding.resumeState === "REVIEW" &&
+    polishingPolicy(before.settings).independentReview &&
+    binding.checkpoint ===
+      `review:read-only:${candidateReviewCheckpoint(before)}` &&
+    (next.activeTurn === null || after.workflowState === "REVIEW") &&
+    isDeepStrictEqual(previous.counters, next.counters) &&
+    isDeepStrictEqual(after, { ...before, workflowState: after.workflowState })
+  );
+}
+
+// The first pause must keep the reservation and input hashes that acceptance
+// and dispatch preserve.
+export function assertWritableGateCatalogPause(previous, next, retryCode) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    (!/^(?:polish|check-and-fix|finalize):workspace-write:/u.test(
+      pause.checkpoint,
+    ) &&
+      pause.checkpoint !== WRITABLE_RESOLUTION_CHECKPOINT) ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+  const { role, checkpoint, resumeState } = pause;
+  if (
+    !isDeepStrictEqual(previous.hashes, next.hashes) ||
+    !matchesGateCatalogReservation(previous, next, {
+      role,
+      checkpoint,
+      resumeState,
+    })
+  )
+    throw new Error("Writable gate catalog pause changed its reservation.");
+  return true;
+}
+
+// A first read-only gate pause must retire the gate turn whose own failed
+// attempt recorded the no-effect catalog rejection, keeping its reservation.
+export function assertReadOnlyGateCatalogPause(
+  previous,
+  next,
+  retryCode,
+  turnStart,
+  attempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    !/^(?:review|clean-confirm|confirm):read-only:/u.test(pause.checkpoint) ||
+    isValidationMigrationCheckpoint(pause.checkpoint) ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+  const { role, checkpoint, resumeState } = pause;
+  const turn = previous.activeTurn;
+  // Review and clean confirmation may capture the inspected infrastructure
+  // once; a saved fingerprint stays unchanged through later misses.
+  const field = "catalogReviewInfrastructureFingerprint";
+  let pipelineState = next.pipelineState;
+  if (
+    !checkpoint.startsWith("confirm:") &&
+    !Object.hasOwn(previous.pipelineState, field)
+  ) {
+    const { [field]: _, ...reserved } = pipelineState;
+    pipelineState = reserved;
+  }
+  if (
+    turn?.role !== role ||
+    turn.phase !== checkpoint.split(":")[0] ||
+    previous.pipelineState.workflowState !== resumeState ||
+    attempt?.role !== role ||
+    attempt.checkpoint !== checkpoint ||
+    (turnStart?.catalogCheckpoint !== undefined &&
+      turnStart.catalogCheckpoint !== checkpoint) ||
+    !isDeepStrictEqual(previous.hashes, next.hashes) ||
+    !matchesGateCatalogReservation(
+      previous,
+      { ...next, pipelineState },
+      { role, checkpoint, resumeState },
+    )
+  )
+    throw new Error("Read-only gate catalog pause changed its reservation.");
+  return true;
+}
+
+// Migration turns keep the suspended workflow phase, so their checkpoints
+// share gate prefixes but never gate reservations.
+function isValidationMigrationCheckpoint(checkpoint) {
+  return /^[a-z-]+:read-only:validation-migration$/u.test(checkpoint);
+}
+
+export function matchesValidationMigrationCatalogReservation(
+  previous,
+  next,
+  binding,
+) {
+  if (!isValidationMigrationCheckpoint(binding.checkpoint)) return undefined;
+  const { phase } = activeTurn(binding.role, binding.resumeState);
+  if (binding.checkpoint !== `${phase}:read-only:validation-migration`)
+    return false;
+
+  const before = previous.pipelineState;
+  const after = next.pipelineState;
+  const policy = polishingPolicy(before.settings);
+  return (
+    before.validationMigrationPending === true &&
+    (binding.role === "arbiter"
+      ? policy.bootstrapArbitration &&
+        before.validationMigrationDisagreement != null
+      : before.validationMigrationDisagreement == null &&
+        (binding.role === "worker" ||
+          (binding.role === "reviewer" && policy.independentBootstrap))) &&
+    isDeepStrictEqual(after, {
+      ...before,
+      workflowState: after.workflowState,
+    }) &&
+    isDeepStrictEqual(previous.counters, next.counters)
+  );
+}
+
+// A first migration pause must retire the rediscovery turn whose own failed
+// attempt recorded the no-effect catalog rejection, keeping its reservation.
+export function assertValidationMigrationCatalogPause(
+  previous,
+  next,
+  retryCode,
+  turnStart,
+  attempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    !isValidationMigrationCheckpoint(pause.checkpoint) ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+  const { role, checkpoint, resumeState } = pause;
+  if (
+    previous.activeTurn?.role !== role ||
+    previous.activeTurn.phase !== checkpoint.split(":")[0] ||
+    attempt?.role !== role ||
+    attempt.checkpoint !== checkpoint ||
+    (turnStart?.catalogCheckpoint !== undefined &&
+      turnStart.catalogCheckpoint !== checkpoint) ||
+    !isDeepStrictEqual(previous.hashes, next.hashes) ||
+    !matchesValidationMigrationCatalogReservation(previous, next, {
+      role,
+      checkpoint,
+      resumeState,
+    })
+  )
+    throw new Error("Validation migration catalog pause has no proof.");
+  return true;
+}
+
+export function assertDirectReadOnlyCatalogPause(
+  previous,
+  next,
+  retryCode,
+  turnStart,
+  attempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+
+  const before = previous.pipelineState;
+  const policy = polishingPolicy(before.settings);
+  const { role, phase } = activeTurn(pause.role, before.workflowState);
+  const purpose = {
+    CLARIFY: role === "worker" && "clarification",
+    BOOTSTRAP:
+      role === "arbiter"
+        ? policy.bootstrapArbitration &&
+          before.bootstrapDisagreement != null &&
+          "arbitration"
+        : (role === "worker" ||
+            (role === "reviewer" && policy.independentBootstrap)) &&
+          "bootstrap",
+    FINALIZE:
+      role === "worker" &&
+      before.pendingFinalizationCorrection != null &&
+      "finalization-correction",
+    RESOLVE_FINDINGS:
+      role === "arbiter"
+        ? policy.arbitration && "arbitration"
+        : role === "reviewer"
+          ? policy.independentReview &&
+            before.pendingDisputes?.length > 0 &&
+            "review"
+          : role === "worker" && !policy.independentReview && "work",
+  }[before.workflowState];
+  if (
+    !purpose ||
+    pause.checkpoint !== `${phase}:read-only:${purpose}` ||
+    previous.activeTurn?.phase !== phase ||
+    attempt?.role !== role ||
+    attempt.checkpoint !== pause.checkpoint ||
+    (turnStart?.catalogCheckpoint !== undefined &&
+      turnStart.catalogCheckpoint !== pause.checkpoint) ||
+    !isDeepStrictEqual(next.pipelineState, {
+      ...before,
+      workflowState: next.pipelineState.workflowState,
+    }) ||
+    !isDeepStrictEqual(previous.counters, next.counters)
+  )
+    throw new Error(
+      "Catalog pause has no matching read-only polishing invocation.",
+    );
+  return true;
+}
+
 const RESOLUTION_CORRECTION_FIELDS = Object.freeze([
   "schemaVersion",
   "stage",
@@ -2949,6 +3539,7 @@ export const RESOLUTION_CANDIDATE_REPOSITORY_FIELDS = Object.freeze([
 const RESOLUTION_CORRECTION_STAGES = Object.freeze([
   "invoking",
   "ready",
+  "retry-ready",
   "correcting",
   "exhausted",
   "blocked",
@@ -2986,6 +3577,13 @@ export function resolutionCorrectionDiagnostic(value) {
     value.constraint === INTERRUPTED_RESOLUTION_DIAGNOSTIC.constraint
   ) {
     return INTERRUPTED_RESOLUTION_DIAGNOSTIC;
+  }
+  if (
+    isRecord(value) &&
+    value.field === CATALOG_RESOLUTION_DIAGNOSTIC.field &&
+    value.constraint === CATALOG_RESOLUTION_DIAGNOSTIC.constraint
+  ) {
+    return CATALOG_RESOLUTION_DIAGNOSTIC;
   }
   return isRecord(value) &&
     typeof value.field === "string" &&
@@ -3099,6 +3697,24 @@ export function resolutionFactsFingerprint(state) {
   );
 }
 
+export function upgradeLegacyResolutionCorrection(state) {
+  const checkpoint = state.resolutionCorrection;
+  if (checkpoint === null) return null;
+  if (
+    !isRecord(checkpoint) ||
+    checkpoint.schemaVersion !== 1 ||
+    Object.hasOwn(checkpoint, "repair") ||
+    Object.hasOwn(checkpoint, "factsFingerprint")
+  )
+    return undefined;
+  return Object.freeze({
+    ...checkpoint,
+    schemaVersion: 2,
+    repair: null,
+    factsFingerprint: resolutionFactsFingerprint(state),
+  });
+}
+
 export function unfinishedResolutionReport(state, result) {
   const checkpoint = state.resolutionCorrection;
   return {
@@ -3187,8 +3803,25 @@ function validResolutionCorrection(state) {
   if (value === null) return true;
   const hash = (entry) => typeof entry === "string" && HASH_PATTERN.test(entry);
   const count = (entry) => Number.isSafeInteger(entry) && entry >= 0;
+  const hasStart =
+    isRecord(value) && Object.hasOwn(value, "restatementStartedAfter");
+  const hasConsumedRestatement = [
+    "retry-ready",
+    "correcting",
+    "exhausted",
+    "blocked",
+  ].includes(value?.stage);
   if (
-    !hasExactFields(value, RESOLUTION_CORRECTION_FIELDS) ||
+    !hasExactFields(
+      value,
+      hasStart
+        ? [...RESOLUTION_CORRECTION_FIELDS, "restatementStartedAfter"]
+        : RESOLUTION_CORRECTION_FIELDS,
+    ) ||
+    (hasStart &&
+      (!count(value.restatementStartedAfter) ||
+        value.restatementStartedAfter === 0 ||
+        ["invoking", "ready"].includes(value.stage))) ||
     value.schemaVersion !== 2 ||
     value.factsFingerprint !== resolutionFactsFingerprint(state) ||
     !polishingPolicy(state.settings).independentReview ||
@@ -3212,7 +3845,7 @@ function validResolutionCorrection(state) {
     !Number.isSafeInteger(value.additionalAttempts + 1) ||
     value.attempts < value.additionalAttempts ||
     value.attempts > value.additionalAttempts + 1 ||
-    (["correcting", "exhausted", "blocked"].includes(value.stage) &&
+    (hasConsumedRestatement &&
       value.attempts !== value.additionalAttempts + 1) ||
     (["invoking", "ready"].includes(value.stage) &&
       value.repair === null &&
@@ -3226,8 +3859,7 @@ function validResolutionCorrection(state) {
           ...resolutionCorrectionDiagnostic(diagnostic),
         }),
     ) ||
-    (["correcting", "exhausted", "blocked"].includes(value.stage) &&
-      value.diagnostics.length === 0) ||
+    (hasConsumedRestatement && value.diagnostics.length === 0) ||
     (value.productDecision !== null &&
       (!["ready", "correcting"].includes(value.stage) ||
         !validResolutionProductDecision(value.productDecision)))
@@ -4594,10 +5226,18 @@ export function normalizePipelineState(value) {
   if (isRecord(value) && !Object.hasOwn(value, "artifactRoot")) {
     value = { ...value, artifactRoot: "LOCAL_ARTIFACTS" };
   }
+  if (!isRecord(value)) throw workflowError("Polishing state is invalid.");
+  const { catalogReviewInfrastructureFingerprint, ...fields } = value;
   if (
-    !isRecord(value) ||
-    Object.keys(value).length !== PIPELINE_STATE_FIELDS.size ||
-    Object.keys(value).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
+    Object.keys(fields).length !== PIPELINE_STATE_FIELDS.size ||
+    Object.keys(fields).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
+    (Object.hasOwn(value, "catalogReviewInfrastructureFingerprint") &&
+      (typeof catalogReviewInfrastructureFingerprint !== "string" ||
+        !HASH_PATTERN.test(catalogReviewInfrastructureFingerprint) ||
+        value.preflightComplete !== true ||
+        !["REVIEW", "CLEAN_CONFIRM", "WAITING_FOR_USER"].includes(
+          value.workflowState,
+        ))) ||
     !WORKFLOW_STATES.includes(value.workflowState)
   ) {
     throw workflowError("Polishing state is invalid.");
@@ -6524,8 +7164,10 @@ export function assertRun(run) {
   const correction = state.resolutionCorrection;
   if (
     correction !== null &&
-    (counters.fixRounds !==
-      correction.fixRoundsBefore + (correction.fixCharged ? 1 : 0) ||
+    (correction.restatementStartedAfter > run.revision ||
+      (correction.stage === "retry-ready" && run.activeTurn !== null) ||
+      counters.fixRounds !==
+        correction.fixRoundsBefore + (correction.fixCharged ? 1 : 0) ||
       (["exhausted", "blocked"].includes(correction.stage) &&
         state.workflowState === "RESOLVE_FINDINGS"))
   ) {

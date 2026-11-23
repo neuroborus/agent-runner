@@ -12,12 +12,16 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   serveMcp,
 } from "./mcp/index.js";
-import { getPipeline, listPipelines } from "./pipeline-registry.js";
+import {
+  createRunStore,
+  getPipeline,
+  listPipelines,
+  resolveStopBoundary,
+} from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import { createRuntimeAdmission } from "./runtime/index.js";
 import { createUpdateService, isUpdateVersion } from "./update/index.js";
 import {
-  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
@@ -1030,7 +1034,12 @@ async function runCommand(
       return 0;
     }
     if (command === "guidance") {
-      const service = guidance ?? createCommandGuidance({ env: environment });
+      const service =
+        guidance ??
+        createCommandGuidance({
+          env: environment,
+          runStore: createCommandRunStore({ resolveStopBoundary }),
+        });
       const input = {
         projectPath: values.project,
         ...(values["project-config"] === undefined

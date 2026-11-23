@@ -288,6 +288,9 @@ test("workspace imports follow root to pipeline to shared-package direction", as
       owner === undefined ||
       target === undefined ||
       (requiresDeclaration && !Object.hasOwn(owner.dependencies, specifier)) ||
+      (owner.tier === 0 &&
+        target.tier === 1 &&
+        importer !== join(ROOT, "src/pipeline-registry.js")) ||
       target.tier <= owner.tier
     ) {
       failures.push(`${relative(ROOT, importer)} imports ${specifier}`);
@@ -379,8 +382,11 @@ test("the agent index does not re-export platform capabilities", async () => {
 test("operator guidance stays outside pipeline roles and run reconstruction", async () => {
   const { files, imports } = await sourceImports();
   for (const { importer, specifier } of imports) {
-    if (!specifier.includes("guidance/")) continue;
     const path = relative(ROOT, importer);
+    if (path.startsWith("src/guidance/")) {
+      assert.doesNotMatch(specifier, /pipeline-registry\.js$/u, path);
+    }
+    if (!specifier.includes("guidance/")) continue;
     assert.ok(
       path === "src/index.js" ||
         path === "src/cli.js" ||
@@ -409,7 +415,7 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
   }
   const root = await import("../src/index.js");
   const guidance = await import("../src/guidance/index.js");
-  assert.equal(root.createGuidanceService, guidance.createGuidanceService);
+  assert.equal(typeof root.createGuidanceService, "function");
   assert.deepEqual(
     Object.keys(guidance).sort(),
     [

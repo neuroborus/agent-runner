@@ -71,6 +71,22 @@ alone establishes neither a numeric output ceiling nor context utilization.
 See the provider model (`docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery`)
 for the recognition and safety boundaries.
 
+## Model catalog pauses
+
+A [model catalog pause](provider-recovery.md#model-catalog-misses) shows
+`ERR_MODEL_CATALOG_RETRY` with reason `backend_unavailable`, or
+`provider_interrupted` for init, plus the saved resume state and any offered
+action. When status offers the null resume action, run
+`agent-run resume --run <run-id>` after the model is available again; the run
+retries the frozen selection at its saved checkpoint. A legacy plan execution
+validation-migration Arbiter pause without its saved disagreement keeps the
+code but shows no resume state and rejects resume; start a new run. A plan
+execution `commit_failed` pause recorded for a catalog miss without journaled
+pre-executor proof, including one from an older run, offers no fresh COMMIT
+authorization in status, resume validation or workflow dispatch. When no
+authorization remains, it shows no resume state. When a consumed authorization
+survives, resume only verifies whether its commit occurred and cannot renew it.
+
 ## Audit reconstruction
 
 For audit, explicit resume reconstructs the same suspended checkpoint in fresh

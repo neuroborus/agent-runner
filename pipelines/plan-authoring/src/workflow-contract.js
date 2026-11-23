@@ -1386,6 +1386,81 @@ export function normalizedCounters(counters) {
   );
 }
 
+// A first catalog pause must retire the invocation whose own failed attempt
+// recorded the no-effect read-only rejection at the same checkpoint.
+export function assertCatalogTransition(
+  previous,
+  next,
+  _activity,
+  retryCode,
+  turnStart,
+  commitRejection,
+  attempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    commitRejection === undefined &&
+    (pause?.code !== retryCode ||
+      previous.modelCatalogResume != null ||
+      prior?.code === retryCode)
+  )
+    return;
+  const state = previous.pipelineState;
+  const phase = state.workflowState.toLowerCase().replaceAll("_", "-");
+  const arbitration = phase === "revise" && pause?.role === "arbiter";
+  const role = arbitration
+    ? "arbiter"
+    : phase === "review"
+      ? "reviewer"
+      : "planner";
+  const correcting =
+    ["check-and-fix", "clean-confirm"].includes(phase) &&
+    state.pendingLazyCorrection != null;
+  const checkpoint = arbitration
+    ? "arbitration"
+    : phase === "clarify"
+      ? "clarification"
+      : correcting
+        ? `lazy-correction:${phase}`
+        : "planning";
+  if (
+    commitRejection !== undefined ||
+    ![
+      "CLARIFY",
+      "DRAFT",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "REVISE",
+    ].includes(state.workflowState) ||
+    !checkpointAllowed(state.settings, state.workflowState) ||
+    pause.role !== role ||
+    pause.checkpoint !== `${phase}:read-only:${checkpoint}` ||
+    previous.activeTurn?.role !== pause.role ||
+    previous.activeTurn.phase !== phase ||
+    attempt?.role !== pause.role ||
+    attempt.checkpoint !== pause.checkpoint ||
+    (turnStart?.catalogCheckpoint !== undefined &&
+      turnStart.catalogCheckpoint !== pause.checkpoint) ||
+    !matchesCatalogReservation(previous, next, pause)
+  )
+    throw workflowError("Catalog pause has no failed-attempt proof.");
+  return true;
+}
+
+export function matchesCatalogReservation(previous, next, binding) {
+  const { workflowState } = next.pipelineState;
+  return (
+    (next.activeTurn === null || workflowState === binding.resumeState) &&
+    isDeepStrictEqual(next.pipelineState, {
+      ...previous.pipelineState,
+      workflowState,
+    }) &&
+    isDeepStrictEqual(previous.counters, next.counters)
+  );
+}
+
 // A settled pause retains its checkpoint until a fresh cancellation of exactly
 // that quiescent state is reconciled; cancellation itself must be reconciled.
 function operatorStopRequestValid(request, canceled) {

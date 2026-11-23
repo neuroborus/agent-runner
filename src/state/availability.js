@@ -45,6 +45,7 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CHECKPOINT = /^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
+const ATOMIC_RETIREMENT_SCHEMA_VERSION = 28;
 
 function exactFields(value, fields) {
   return (
@@ -141,9 +142,57 @@ export function normalizeAvailabilityState(state) {
   };
 }
 
+export function isRestatementReplacingActiveTurn(
+  previous,
+  current,
+  activity,
+  readRestatementStart,
+) {
+  if (
+    previous.activeTurn === null ||
+    current.activeTurn === null ||
+    activity?.kind !== "turn-started" ||
+    current.schemaVersion < ATOMIC_RETIREMENT_SCHEMA_VERSION
+  )
+    return false;
+  const boundary = readRestatementStart?.(current);
+  // Ordinary reconstruction can carry an older marker without issuing one.
+  return (
+    boundary !== undefined &&
+    (boundary === previous.revision ||
+      boundary !== readRestatementStart(previous))
+  );
+}
+
+export function matchesObservedAvailabilityRetirement(
+  previous,
+  current,
+  matchesAvailabilityRetirement,
+  activeTurnStart,
+) {
+  const attempt = previous.observations?.attempts.at(-1);
+  const episode = current.availabilityRetry;
+  // Observation IDs are journal revisions. The failed attempt must have
+  // started after this turn, including when it used a retained checkpoint.
+  return (
+    activeTurnStart != null &&
+    attempt?.status === "failed" &&
+    attempt.id > activeTurnStart.previousRevision + 1 &&
+    attempt.role === episode.role &&
+    attempt.checkpoint === episode.checkpoint &&
+    matchesAvailabilityRetirement?.(previous, current, activeTurnStart) === true
+  );
+}
+
 // Identity and progression survive unrelated transitions, migration and restart.
 // Clearing an episode is reserved for the coordinator's successful-turn path.
-export function assertAvailabilityContinuity(previous, current) {
+export function assertAvailabilityContinuity(
+  previous,
+  current,
+  activity,
+  matchesAvailabilityRetirement,
+  activeTurnStart,
+) {
   const before = previous.availabilityRetry;
   const after = current.availabilityRetry;
   if (after === null) return;
@@ -152,7 +201,18 @@ export function assertAvailabilityContinuity(previous, current) {
     EPISODE_FIELDS.every((field) => before[field] === after[field]);
   if (unchanged) return;
   if (
-    previous.activeTurn !== null ||
+    (previous.activeTurn !== null &&
+      (current.schemaVersion < ATOMIC_RETIREMENT_SCHEMA_VERSION ||
+        previous.activeTurn.role !== after.role ||
+        activity?.actor !== after.role ||
+        activity.phase !== "availability" ||
+        activity.kind !== "retry-scheduled" ||
+        !matchesObservedAvailabilityRetirement(
+          previous,
+          current,
+          matchesAvailabilityRetirement,
+          activeTurnStart,
+        ))) ||
     previous.preparation != null ||
     previous.executionProcess !== null ||
     previous.executionResource !== null ||

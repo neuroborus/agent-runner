@@ -2205,14 +2205,17 @@ test("finding-resolution correction checkpoints and pauses stay strictly bound",
     },
   ]);
   assert.doesNotThrow(() => assertRun(run));
-  const withCorrection = (patch, pipelineState = {}) => ({
+  const withCorrection = (patch, pipelineState = {}, base = correction) => ({
     ...run,
     pipelineState: {
       ...run.pipelineState,
       ...pipelineState,
-      resolutionCorrection: { ...correction, ...patch },
+      resolutionCorrection: { ...base, ...patch },
     },
   });
+  // Only a consumed restatement records where its read-only turn started.
+  const unconsumed = { ...correction };
+  delete unconsumed.restatementStartedAfter;
   const decision = {
     decision: {
       question: "Which neutral variant applies?",
@@ -2241,6 +2244,7 @@ test("finding-resolution correction checkpoints and pauses stay strictly bound",
         ...patch,
       },
       { workflowState: "RESOLVE_FINDINGS", ...pipelineState },
+      unconsumed,
     ),
     pause: null,
   });
@@ -2256,6 +2260,7 @@ test("finding-resolution correction checkpoints and pauses stay strictly bound",
     invoking({ contentChanged: false }),
     invoking({ diagnostics: correction.diagnostics }),
     invoking({ attempts: 1, additionalAttempts: 1 }),
+    invoking({ restatementStartedAfter: correction.restatementStartedAfter }),
   ]) {
     assert.throws(() => assertRun(invalid), /resolution correction/u);
   }

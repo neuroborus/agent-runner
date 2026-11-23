@@ -217,6 +217,13 @@ At minimum cover:
     worktree exclusion; detached stop supervision waits for settlement or the
     correlated child exit, and exact-revision action-free recovery with a new
     key preserves receipt replay, version skew, and single-owner safety.
+79. [explicit-model catalog recovery](recovery.md#explicit-model-catalog-recovery)
+    preserves the initial `IMPLEMENT` reservation, read-only restatement
+    attempts, gate retries, validation-migration arbitration and COMMIT proof
+    with their frozen inputs, scopes and counters; a generic, completed,
+    stale or mismatched attempt, possible effects, a legacy `commit_failed`
+    catalog pause and workspace drift grant no retry. Root suite ownership is
+    in the [runner testing map](../../../docs/testing/runner.md#explicit-model-catalog-recovery).
 
 Real Codex/Claude smoke tests should be opt-in integration tests. The owned
 Codex smoke registers its supervised process and must read and validate the

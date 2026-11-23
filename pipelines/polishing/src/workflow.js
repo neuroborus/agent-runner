@@ -22,6 +22,10 @@ import {
   polishingPolicy,
   selectRoleSession,
 } from "./mode-policy.js";
+import {
+  hasLegacyResolutionBackoff,
+  legacyResolutionExpiryStart,
+} from "./resolution-recovery.js";
 
 import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
@@ -77,6 +81,11 @@ import {
   assertRun,
   assertRuntime,
   assertSettings,
+  beginResolutionRestatement,
+  candidateCheckCheckpoint,
+  candidateCleanCheckpoint,
+  candidateReviewCheckpoint,
+  CATALOG_RESOLUTION_DIAGNOSTIC,
   classifyResolutionResult,
   createFinalizationGuidanceDecision,
   createPolishingState,
@@ -94,6 +103,7 @@ import {
   isOutputDiagnostic,
   isRecord,
   LAZY_OUTPUT_RETRY_EXPLANATION,
+  matchesResolutionRestatementCatalogAttempt,
   MAX_DIAGNOSTIC_ITEMS,
   MAX_CLARIFICATION_ROUNDS,
   MAX_VALIDATION_ITEMS,
@@ -116,6 +126,7 @@ import {
   normalizeReviewResult,
   normalizeStagnationResult,
   normalizedCounters,
+  originalResolutionCheckpoint,
   PolishingWorkflowError,
   RESOLUTION_CANDIDATE_REPOSITORY_FIELDS,
   RESOLUTION_CORRECTION_CHECKPOINT,
@@ -125,6 +136,7 @@ import {
   resolutionCorrectionDiagnostic,
   resolutionNonDisputableIds,
   resolutionFactsFingerprint,
+  resolutionFixBudgetExhausted,
   unfinishedResolutionReport,
   sha256,
   snapshotChangeEvidence,
@@ -187,6 +199,7 @@ const RETRYABLE_CHECKPOINT_PAUSES = new Set([
   "review_output_invalid",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+const CATALOG_WORKSPACE_CHANGED = "ERR_MODEL_CATALOG_WORKSPACE_CHANGED";
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 
 function rolePrompt(prompt) {
@@ -615,6 +628,8 @@ export async function runPolishing({
   runtime,
   settings,
   operatorStop = false,
+  operatorStopReadOnlyCatalogRejection = null,
+  interruptedWritableNoEffect = false,
 }) {
   assertRun(run);
   if (run.pipelineState.workflowState === "CANCELED") return run;
@@ -636,26 +651,19 @@ export async function runPolishing({
   ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
-  // A consumed restatement may run only after this process persisted it or
-  // when it resumes the classified pause that suspended that same attempt,
-  // including a consumed provider allowance refused before invocation.
+  // The catalog binding survives resume until this same restatement starts.
   let restatementAuthorized =
-    (["authentication_required", "output_exhausted"].includes(
-      run.pause?.reason,
-    ) ||
-      (run.pause?.reason === "backend_unavailable" &&
-        [
-          "ERR_PROVIDER_INACTIVE",
-          "ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED",
-        ].includes(run.pause.code))) &&
-    run.pipelineState.resolutionCorrection?.stage === "correcting";
+    runtime.catalogRetry?.resuming(
+      "worker",
+      RESOLUTION_CORRECTION_CHECKPOINT,
+    ) && run.pipelineState.resolutionCorrection?.stage === "correcting";
   // The last provider failure that no disposition classified, raised only
   // after its turn retired and the repository was reconciled.
   let unclassifiedRoleFailure = null;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let dispositionPausePersistence = false;
-  // An unacknowledged history or continued-repair write may be durable.
+  // An unacknowledged checkpoint write may already be durable.
   let protectedPublicationFailure = null;
   let clarificationAppendInProgress = false;
 
@@ -725,14 +733,24 @@ ${JSON.stringify(reports)}`;
     };
   }
 
-  async function restartFinalizationAfterConfirmationDrift(current, code) {
+  async function handleConfirmationScopeDrift(current, code) {
+    const clearedFinalization = {
+      ...clearedTerminalGate(),
+      finalizationCorrection: null,
+      pendingFinalizationCorrection: null,
+    };
+    // An accepted catalog retry can stop safely before its bound turn starts.
+    if (currentRun.modelCatalogResume?.resumeState === "CONFIRM") {
+      await pause("unsafe_git_state", { code }, clearedFinalization, {
+        nextActiveTurn: null,
+      });
+      return false;
+    }
     await transition(
       {
         ...current,
         workflowState: "FINALIZE",
-        ...clearedTerminalGate(),
-        finalizationCorrection: null,
-        pendingFinalizationCorrection: null,
+        ...clearedFinalization,
       },
       {
         publicActivity: activity(
@@ -743,6 +761,7 @@ ${JSON.stringify(reports)}`;
         ),
       },
     );
+    return true;
   }
 
   async function pauseAfterConfirmationContentDrift(current, code) {
@@ -857,10 +876,24 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       pause = currentRun.pause,
       publicActivity,
       nextActiveTurn,
+      retainProviderRecovery,
     } = {},
   ) {
     if (protectedPublicationFailure !== null)
       throw protectedPublicationFailure.cause;
+    if (
+      nextPipelineState.catalogReviewInfrastructureFingerprint !== undefined &&
+      (!["REVIEW", "CLEAN_CONFIRM", "WAITING_FOR_USER"].includes(
+        nextPipelineState.workflowState,
+      ) ||
+        (state().workflowState === "CLEAN_CONFIRM" &&
+          nextPipelineState.workflowState === "REVIEW") ||
+        pause?.reason === "review_output_invalid")
+    ) {
+      const { catalogReviewInfrastructureFingerprint: _, ...remainingState } =
+        nextPipelineState;
+      nextPipelineState = remainingState;
+    }
     if (
       nextPipelineState.repositoryBaseline?.contentFingerprint !==
       state().repositoryBaseline?.contentFingerprint
@@ -894,10 +927,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const publishesProtectedState =
       !isDeepStrictEqual(state().workReports, nextPipelineState.workReports) ||
       state().resolutionCorrection?.repair != null ||
-      nextPipelineState.resolutionCorrection?.stage === "repair-authorized";
+      (state().resolutionCorrection?.stage === "invoking" &&
+        nextPipelineState.resolutionCorrection?.stage === "ready") ||
+      nextPipelineState.resolutionCorrection?.stage === "repair-authorized" ||
+      (pause === null &&
+        (nextPipelineState.resolutionCorrection?.stage === "retry-ready" ||
+          currentRun.modelCatalogResume != null ||
+          (runtime.catalogRetry?.code !== undefined &&
+            currentRun.pause?.code === runtime.catalogRetry.code)));
     try {
       currentRun = await runtime.transition(patch, {
         activity: publicActivity,
+        retainProviderRecovery,
       });
     } catch (cause) {
       if (publishesProtectedState) protectedPublicationFailure = { cause };
@@ -913,11 +954,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     pipelineStatePatch = {},
     options = {},
   ) {
-    dispositionPausePersistence = [
-      "authentication_required",
-      "output_exhausted",
-      "validation_policy_blocked",
-    ].includes(reason);
+    dispositionPausePersistence =
+      [
+        "authentication_required",
+        "output_exhausted",
+        "validation_policy_blocked",
+      ].includes(reason) ||
+      options.nextActiveTurn === null ||
+      (details.code !== undefined &&
+        details.code === runtime.catalogRetry?.code);
     await transition(
       {
         ...state(),
@@ -1189,11 +1234,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     assertRun(currentRun);
   }
 
-  async function finishAgentTurn(turn, options) {
+  // `expiredRestatement` asserts a proven durable first expiry of the exact
+  // consumed restatement; its journaled retirement still authorizes recovery.
+  async function finishAgentTurn(
+    turn,
+    { expiredRestatement = false, ...options } = {},
+  ) {
     try {
       return await runtime.finishAgentTurn(turn, options);
     } catch (cause) {
-      if (state().resolutionCorrection?.repair != null)
+      const correction = state().resolutionCorrection;
+      if (
+        correction?.repair != null ||
+        correction?.stage === "ready" ||
+        (expiredRestatement && correction?.stage === "correcting")
+      )
         protectedPublicationFailure ??= { cause };
       throw cause;
     }
@@ -1408,18 +1463,19 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         state().resolutionCorrection.repair !== null
       )
         return recoverResolutionCorrectionTurn();
-      await transition({ ...state(), resolutionCorrection: null });
     }
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
-    const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
+    const hasNoEffectProof =
+      interruptedWritableNoEffect && interruptedTurn === run.activeTurn;
+    const writable = interruptedTurnIsWritable(interruptedTurn);
     let reconciledRepository;
     try {
       reconciledRepository = await runtime.git.reconcileInterrupted(
         state().repositoryBaseline,
         {
           allowIndexChanges: false,
-          allowWorkspaceChanges,
+          allowWorkspaceChanges: writable && !hasNoEffectProof,
         },
       );
     } catch (cause) {
@@ -1429,9 +1485,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       await pause(interruptedControlChange(cause), { code: cause.code });
       return false;
     }
+    // The retained expiry can continue only after repository reconciliation.
+    if (state().resolutionCorrection !== null)
+      await transition({ ...state(), resolutionCorrection: null });
     interruptedRepositoryReconciled = true;
     if (
-      allowWorkspaceChanges &&
+      writable &&
       !(await verifyFinalizationGuidance({
         projectPath: reconciledRepository.projectPath,
         repositoryBaseline: reconciledRepository,
@@ -1577,20 +1636,34 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       if (checkpoint.stage === "ready" && (await resolutionScopeChanged()))
         return false;
     }
-    // A recorded restatement turn was invoked, so it is lost unless its own
-    // expiry was proven. It settles before retirement, so retained provider
-    // evidence can never reauthorize it.
+    const expired = hasInterruptedRestatementExpiry(checkpoint);
+    if (expired && currentRun.inactivityRecovery.attempt === 2) {
+      await pauseRestatementInactivity();
+      interruptedTurn = null;
+      return false;
+    }
     const lost =
       checkpoint.stage === "correcting" &&
       checkpoint.productDecision === null &&
-      !restatementExpiryPending();
+      !expired;
     if (lost)
       await exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
-    currentRun = await finishAgentTurn(interruptedTurn);
+    currentRun = await finishAgentTurn(interruptedTurn, {
+      expiredRestatement: expired,
+    });
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
     return !lost;
+  }
+
+  async function pauseRestatementInactivity() {
+    await pause(
+      "backend_unavailable",
+      { code: "ERR_PROVIDER_INACTIVE", resumeState: "RESOLVE_FINDINGS" },
+      {},
+      { nextActiveTurn: null },
+    );
   }
 
   let resumedOutputCheckpoint =
@@ -1605,33 +1678,79 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             : null))
       : { checkpoint: resumedOutputCheckpoint };
   }
-  // A restatement keeps the unfinished provider recovery of its original
-  // turn at that original's checkpoint until success.
-  function originalResolutionCheckpoint() {
-    return `resolve-findings:${state().resolutionCorrection.access}:work`;
-  }
-  // Applies only before invocation: availability is scheduled after a
-  // retirement, so it never describes a still-recorded restatement turn.
-  function restatementRetryPending() {
-    const evidence = retryCheckpointEvidence();
+  function matchesRestatementRecovery(recovery) {
     return (
-      evidence?.checkpoint === RESOLUTION_CORRECTION_CHECKPOINT ||
-      (evidence?.role === "worker" &&
-        evidence.checkpoint === originalResolutionCheckpoint())
-    );
-  }
-  // Only the recorded attempt's own first expiry keeps the shared
-  // reconstruction allowance.
-  function restatementExpiryPending() {
-    const recovery = currentRun.inactivityRecovery;
-    return (
-      recovery?.status === "expired" &&
-      recovery.attempt === 1 &&
-      recovery.role === "worker" &&
+      recovery?.role === "worker" &&
+      recovery.contentFingerprint ===
+        state().repositoryBaseline.contentFingerprint &&
       [
         RESOLUTION_CORRECTION_CHECKPOINT,
-        originalResolutionCheckpoint(),
+        originalResolutionCheckpoint(state().resolutionCorrection),
       ].includes(recovery.checkpoint)
+    );
+  }
+
+  function matchesRestatementExpiry() {
+    const recovery = currentRun.inactivityRecovery;
+    return (
+      runtime.matchesObservedInactivityExpiry?.(
+        currentRun,
+        state().resolutionCorrection.restatementStartedAfter ??
+          legacyResolutionExpiryStart(run, currentRun),
+      ) === true && matchesRestatementRecovery(recovery)
+    );
+  }
+
+  function hasInterruptedRestatementExpiry(correction) {
+    const recovery = currentRun.inactivityRecovery;
+    return (
+      correction.stage === "correcting" &&
+      correction.productDecision === null &&
+      isDeepStrictEqual(
+        interruptedTurn,
+        activeTurn("worker", "RESOLVE_FINDINGS"),
+      ) &&
+      recovery?.status === "expired" &&
+      matchesRestatementExpiry()
+    );
+  }
+
+  function hasPendingRestatementReconstruction() {
+    const recovery = currentRun.inactivityRecovery;
+    // Starting the next turn advances restatementStartedAfter past this expiry.
+    return (
+      currentRun.activeTurn === null &&
+      recovery?.status === "reconstructing" &&
+      recovery.reconstructionRevision > recovery.expiryRevision &&
+      matchesRestatementExpiry()
+    );
+  }
+
+  function matchesRestatementBackoff() {
+    const episode = currentRun.availabilityRetry;
+    const correction = state().resolutionCorrection;
+    // The episode can survive several invocations of this same checkpoint.
+    return (
+      matchesRestatementRecovery(episode) &&
+      (episode.reconciledRevision > correction.restatementStartedAfter ||
+        (correction.restatementStartedAfter === undefined &&
+          hasLegacyResolutionBackoff(run) &&
+          isDeepStrictEqual(episode, run.availabilityRetry) &&
+          isDeepStrictEqual(
+            correction,
+            run.pipelineState.resolutionCorrection,
+          )))
+    );
+  }
+
+  function restatementRetryPending() {
+    const recovery = currentRun.inactivityRecovery;
+    return (
+      matchesRestatementBackoff() ||
+      (recovery?.status === "expired" &&
+        recovery.attempt === 1 &&
+        matchesRestatementExpiry()) ||
+      hasPendingRestatementReconstruction()
     );
   }
 
@@ -1642,6 +1761,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       if (result !== availabilityRetry) return result;
       if (options?.reserveResolution?.repair !== undefined) return result;
       await options?.onAvailabilityRetry?.();
+      options = { ...options, continueEpisode: false };
     }
   }
 
@@ -1652,9 +1772,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     {
       access = "read-only",
       checkpoint,
+      candidateInfrastructureFingerprint,
+      verifyCandidateScope,
       freshSession = false,
       recoveryContext = "",
       reportWorkspaceChange = false,
+      continueEpisode = false,
       reserveResolution,
       classifyResult,
     } = {},
@@ -1709,11 +1832,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
+    const isResolutionRestatement =
+      checkpoint === "finding-resolution-correction";
     // Owner loss never renews either allowance of the lost original.
-    const originalCheckpoint =
-      checkpoint === "finding-resolution-correction"
-        ? originalResolutionCheckpoint()
-        : null;
+    const originalCheckpoint = isResolutionRestatement
+      ? originalResolutionCheckpoint(state().resolutionCorrection)
+      : null;
     const recoveryCheckpoint = [
       currentRun.availabilityRetry,
       currentRun.inactivityRecovery,
@@ -1723,6 +1847,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     )
       ? originalCheckpoint
       : availabilityCheckpoint;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      availabilityCheckpoint,
+    );
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
         role,
@@ -1735,6 +1863,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         role,
         checkpoint: recoveryCheckpoint,
         repository: turnSnapshot,
+        continueEpisode:
+          catalogResume ||
+          (isResolutionRestatement &&
+            (state().resolutionCorrection.stage === "retry-ready" ||
+              matchesRestatementBackoff() ||
+              hasPendingRestatementReconstruction())) ||
+          (continueEpisode && recoveryCheckpoint === originalCheckpoint),
       });
     }
     const latestSession = [...currentRun.sessionLineage.children]
@@ -1747,7 +1882,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       contextKey,
       sourceSession: currentRun.sessionLineage.source,
       sourceForkConsumed: state().lazySourceForkConsumed,
-      recovering,
+      recovering: recovering || catalogResume,
       freshSession,
     });
     const sourceForkRecovery = state().authenticationSourceForkRecovery;
@@ -1819,8 +1954,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     resumeSessionContext = false;
     let response;
     let agentError;
+    let writableNoEffect = false;
+    let configurationChangedWithoutEffect = false;
     let repositoryReconciled = false;
     let inactivityFailure = false;
+    let expiredRestatement = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
     let outputExhausted = false;
@@ -1872,9 +2010,21 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     )
       throw workflowError("Finding repair invocation authority was consumed.");
     try {
-      currentRun = await runtime.startAgentTurn(
-        turn,
-        consumeSourceFork || reservation !== null
+      currentRun = await runtime.startAgentTurn(turn, {
+        ...(catalogResume ? { catalogCheckpoint: availabilityCheckpoint } : {}),
+        ...(isResolutionRestatement
+          ? {
+              preparePipelineState: (pipelineState, revision) => ({
+                ...pipelineState,
+                resolutionCorrection: {
+                  ...pipelineState.resolutionCorrection,
+                  stage: "correcting",
+                  restatementStartedAfter: revision,
+                },
+              }),
+            }
+          : {}),
+        ...(consumeSourceFork || reservation !== null
           ? {
               pipelineState: {
                 ...state(),
@@ -1884,11 +2034,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   : { resolutionCorrection: reservation }),
               },
             }
-          : undefined,
-      );
+          : {}),
+      });
     } catch (cause) {
       // Invocation may already be durable; never restore unstarted authority.
       if (
+        catalogResume ||
+        isResolutionRestatement ||
         reservation?.repair != null ||
         state().resolutionCorrection?.repair != null
       )
@@ -1904,10 +2056,20 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let currentInactivityFailure = false;
     let nextRepositoryBaseline;
     try {
+      if (verifyCandidateScope !== undefined && !(await verifyCandidateScope()))
+        return null;
       try {
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
+        writableNoEffect =
+          access === "workspace-write" &&
+          runtime.catalogRetry?.hasWritableNoEffect(turn) === true;
+        configurationChangedWithoutEffect =
+          writableNoEffect &&
+          cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED";
+        // The Runner owns retirement with the configuration pause.
+        if (configurationChangedWithoutEffect) throw cause;
         if (isOwnershipFailure(cause)) throw cause;
         const inactivityExpired = runtime.inactivity?.eligible(cause) === true;
         const inactivityPending =
@@ -1920,6 +2082,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           runtime.authentication?.eligible(cause) === true;
         outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
+      const catalogMiss = runtime.catalogRetry?.eligible(agentError) === true;
+      const lostCatalogResult =
+        runtime.catalogRetry?.hasPossibleEffect(agentError);
       const reportReturned =
         reservation !== null &&
         (agentError === undefined ||
@@ -1934,8 +2099,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       const reportLost =
         reservation !== null &&
         !reportReturned &&
-        ((reservation.repair !== null &&
-          (agentError?.recoverable === true || pausingDisposition)) ||
+        (catalogMiss ||
+          lostCatalogResult ||
+          (reservation.repair !== null &&
+            (agentError?.recoverable === true || pausingDisposition)) ||
           (!currentInactivityFailure &&
             !availabilityFailure &&
             !authenticationFailure &&
@@ -1948,10 +2115,28 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         await runtime.git.assertUnchanged(turnSnapshot);
         await runtime.git.assertUnchanged(baseline);
       } else {
-        nextRepositoryBaseline = await runtime.git.snapshot({
-          allowedPaths: baseline.allowedPaths,
-          projectPath: baseline.projectPath,
-        });
+        if (writableNoEffect) {
+          try {
+            await runtime.git.assertUnchanged(turnSnapshot);
+            await runtime.git.assertUnchanged(baseline);
+          } catch (cause) {
+            if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") throw cause;
+            await pause(
+              "unsafe_git_state",
+              { code: CATALOG_WORKSPACE_CHANGED },
+              {},
+              {
+                nextActiveTurn: null,
+              },
+            );
+            return null;
+          }
+        } else {
+          nextRepositoryBaseline = await runtime.git.snapshot({
+            allowedPaths: baseline.allowedPaths,
+            projectPath: baseline.projectPath,
+          });
+        }
         const reason = workspaceControlChange(
           turnSnapshot,
           nextRepositoryBaseline,
@@ -1978,6 +2163,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           "contentFingerprint",
           "indexFingerprint",
         ].some((field) => baseline[field] !== nextRepositoryBaseline[field]);
+        if (reportLost && lostCatalogResult) {
+          nextRepositoryBaseline = await runtime.git.reconcileInterrupted(
+            turnSnapshot,
+            {
+              allowWorkspaceChanges: !reservation.budgetExhausted,
+              allowIndexChanges: false,
+            },
+          );
+        }
         if (workspaceChanged && !reportReturned && !reportLost) {
           const current = state();
           const contentChangingCorrection =
@@ -2078,10 +2272,23 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         }
       }
       if (reportReturned || reportLost) {
+        // A first expiry journaled during this invocation is durable even
+        // though currentRun still reflects the turn start.
+        const retainsCatalogRecovery =
+          lostCatalogResult ||
+          (catalogMiss &&
+            (inactivityFailure ||
+              (currentRun.inactivityRecovery?.role === role &&
+                currentRun.inactivityRecovery.checkpoint ===
+                  recoveryCheckpoint)));
         await publishResolutionReady(
           nextRepositoryBaseline,
           reportLost
-            ? [INTERRUPTED_RESOLUTION_DIAGNOSTIC]
+            ? [
+                retainsCatalogRecovery
+                  ? CATALOG_RESOLUTION_DIAGNOSTIC
+                  : INTERRUPTED_RESOLUTION_DIAGNOSTIC,
+              ]
             : agentError === undefined
               ? classifyResult(isRecord(response) ? response.structured : null)
               : [resolutionCorrectionDiagnostic(null)],
@@ -2097,6 +2304,37 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         return null;
       }
       repositoryReconciled = true;
+      if (catalogMiss) {
+        const checkpoint = state().resolutionCorrection;
+        if (
+          reservation !== null &&
+          checkpoint.attempts >= checkpoint.additionalAttempts + 1
+        ) {
+          await exhaustResolutionCorrection(checkpoint.diagnostics, {
+            nextActiveTurn: null,
+          });
+          return null;
+        }
+        await pause(
+          "backend_unavailable",
+          {
+            ...runtime.catalogRetry.details(
+              role,
+              reservation === null
+                ? availabilityCheckpoint
+                : RESOLUTION_CORRECTION_CHECKPOINT,
+            ),
+            resumeState: state().workflowState,
+          },
+          candidateInfrastructureFingerprint === undefined
+            ? {}
+            : {
+                catalogReviewInfrastructureFingerprint:
+                  candidateInfrastructureFingerprint,
+              },
+        );
+        return null;
+      }
       if (pausingDisposition) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
@@ -2138,18 +2376,55 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                   ? { lazySourceForkConsumed: false }
                   : {}),
           },
-          exhaustedWorkspace?.options,
+          {
+            ...exhaustedWorkspace?.options,
+            retainProviderRecovery: isResolutionRestatement && exhausted,
+          },
         );
+        return null;
+      }
+      if (isResolutionRestatement && availabilityFailure) {
+        // Retire this turn only with its next backoff. If publication is
+        // uncertain, recovery must use the journal to distinguish the attempts.
+        try {
+          currentRun = await runtime.availability.schedule({
+            cause: agentError,
+            role,
+            checkpoint: recoveryCheckpoint,
+            repository: baseline,
+            reconciledTurn: turn,
+          });
+        } catch (cause) {
+          protectedPublicationFailure = { cause };
+          throw cause;
+        }
+        assertRun(currentRun);
+        return availabilityRetry;
+      }
+      if (isResolutionRestatement && runtime.inactivity?.eligible(agentError)) {
+        // Only this attempt's journaled watchdog raises this failure; retry
+        // binds it durably to this exact turn, checkpoint, invocation marker
+        // and content at attempt 1, failing closed on any mismatch.
+        expiredRestatement = await runtime.inactivity.retry({
+          repository: baseline,
+          reconciledTurn: turn,
+          expiredAfter: state().resolutionCorrection.restatementStartedAfter,
+        });
+        if (expiredRestatement) return availabilityRetry;
+        await pauseRestatementInactivity();
         return null;
       }
     } finally {
       if (
+        protectedPublicationFailure === null &&
         !dispositionPausePersistence &&
+        !configurationChangedWithoutEffect &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
         currentRun = await finishAgentTurn(turn, {
           repositoryReconciled,
+          expiredRestatement,
         });
         assertRun(currentRun);
       }
@@ -3066,6 +3341,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       !current.validationMigrationPending ||
       current.workflowState !== "WAITING_FOR_USER" ||
       current.pendingEdit !== null ||
+      currentRun.modelCatalogResume != null ||
+      (currentRun.pause?.code !== undefined &&
+        currentRun.pause.code === runtime.catalogRetry?.code) ||
       (!RETRYABLE_CHECKPOINT_PAUSES.has(currentRun.pause?.reason) &&
         currentRun.pause?.reason !== "finalization_evidence_rejected" &&
         !(
@@ -5304,7 +5582,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       0,
       MAX_DIAGNOSTIC_ITEMS,
     );
-    const current = state();
+    const { catalogReviewInfrastructureFingerprint: _, ...current } = state();
     const effectiveScope =
       scope.phase === "CHECK_AND_FIX" &&
       current.repositoryBaseline.contentFingerprint !== scope.contentFingerprint
@@ -5448,12 +5726,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               beforeFingerprint = await contentFingerprint();
               alreadyCharged ||= state().availabilityCorrectionCharged;
             },
-            checkpoint:
-              correction === null
-                ? combinedReview(current.settings)
-                  ? "primary-check"
-                  : "work"
-                : "lazy-correction:check-and-fix",
+            checkpoint: candidateCheckCheckpoint(current),
             freshSession: correction !== null,
             recoveryContext: workContext({ includePolishSummary: true }),
           },
@@ -5592,6 +5865,39 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         await validationInfrastructureFingerprint(
           current.validationInfrastructure,
         );
+      const roleCheckpoint = candidateCleanCheckpoint(current);
+      const savedInfrastructure =
+        current.catalogReviewInfrastructureFingerprint;
+      const catalogBound =
+        savedInfrastructure !== undefined ||
+        runtime.catalogRetry?.resuming(
+          "worker",
+          `clean-confirm:read-only:${roleCheckpoint}`,
+        );
+      // A legacy retry can use the scope of an existing correction.
+      const catalogInfrastructure =
+        savedInfrastructure ?? correction?.validationInfrastructureFingerprint;
+      async function verifyCatalogScope(fingerprint) {
+        if (fingerprint === undefined) {
+          if (!(await verifyFinalizationGuidance())) return false;
+          fingerprint = await validationInfrastructureFingerprint(
+            current.validationInfrastructure,
+          );
+        }
+        if (fingerprint === catalogInfrastructure) return true;
+        await pause(
+          "unsafe_git_state",
+          { code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED" },
+          clearedTerminalGate(),
+          { nextActiveTurn: null },
+        );
+        return false;
+      }
+      if (
+        catalogBound &&
+        !(await verifyCatalogScope(inspectedValidationFingerprint))
+      )
+        return false;
       const scope =
         correction ??
         lazyCorrectionScope(
@@ -5639,12 +5945,11 @@ Inspected candidate fingerprint: ${inspectedFingerprint}
 Previous candidate-confirmation findings:
 ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : current.previousFindings, null, 2)}${lazyCorrectionPrompt(correction)}`,
           {
-            checkpoint:
-              correction === null
-                ? combinedReview(current.settings)
-                  ? "primary-clean"
-                  : "work"
-                : "lazy-correction:clean-confirm",
+            checkpoint: roleCheckpoint,
+            candidateInfrastructureFingerprint: inspectedValidationFingerprint,
+            verifyCandidateScope: catalogBound
+              ? () => verifyCatalogScope()
+              : undefined,
             freshSession: correction !== null,
             recoveryContext: workContext({ includePolishSummary: true }),
           },
@@ -5660,10 +5965,6 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
           { clean: true },
         );
         const confirmedFingerprint = await contentFingerprint();
-        const confirmedValidationFingerprint =
-          await validationInfrastructureFingerprint(
-            current.validationInfrastructure,
-          );
         if (confirmedFingerprint !== inspectedFingerprint) {
           await transition({ ...state(), pendingLazyCorrection: null });
           await pause("unsafe_git_state", {
@@ -5671,9 +5972,13 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
           });
           return false;
         }
+        if (catalogBound && !(await verifyCatalogScope())) return false;
         if (
+          !catalogBound &&
           correction !== null &&
-          confirmedValidationFingerprint !== inspectedValidationFingerprint
+          (await validationInfrastructureFingerprint(
+            current.validationInfrastructure,
+          )) !== inspectedValidationFingerprint
         ) {
           await transition({
             ...state(),
@@ -5778,6 +6083,12 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
         );
         return true;
       } catch (cause) {
+        if (
+          catalogBound &&
+          cause?.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+          !(await verifyCatalogScope())
+        )
+          return false;
         const resolution = await handleInvalidLazyOutput(cause, context, scope);
         if (resolution === "retry") {
           continue;
@@ -5790,7 +6101,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
   async function runReviewTurn() {
     const context = reviewOutputContext();
 
-    async function verifiedCandidateScope() {
+    async function verifiedCandidateScope(catalogScope = null) {
       const current = state();
       try {
         await runtime.git.assertUnchanged(current.repositoryBaseline);
@@ -5811,11 +6122,47 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
         });
         return null;
       }
-      const correctionScope = await reviewCorrectionScope(current, fingerprint);
       if (
+        catalogScope !== null &&
+        current.finalizationGuidance?.selection === "file" &&
+        !(await verifyFinalizationGuidance())
+      )
+        return null;
+      const correctionScope = await reviewCorrectionScope(current, fingerprint);
+      const correctionDrifted =
         current.reviewCorrection !== null &&
-        !reviewCorrectionMatchesScope(current.reviewCorrection, correctionScope)
+        !reviewCorrectionMatchesScope(
+          current.reviewCorrection,
+          correctionScope,
+        );
+      const savedInfrastructure =
+        current.catalogReviewInfrastructureFingerprint;
+      const catalogResuming = runtime.catalogRetry?.resuming(
+        "reviewer",
+        `review:read-only:${candidateReviewCheckpoint(current)}`,
+      );
+      const catalogBound = catalogResuming || savedInfrastructure !== undefined;
+      // Older catalog pauses can prove the scope of an existing correction.
+      const catalogInfrastructure =
+        savedInfrastructure ??
+        current.reviewCorrection?.validationInfrastructureFingerprint;
+      if (
+        (catalogScope !== null &&
+          !reviewCorrectionMatchesScope(catalogScope, correctionScope)) ||
+        (catalogBound &&
+          (correctionDrifted ||
+            catalogInfrastructure !==
+              correctionScope.validationInfrastructureFingerprint))
       ) {
+        await pause(
+          "unsafe_git_state",
+          { code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED" },
+          {},
+          { nextActiveTurn: null },
+        );
+        return null;
+      }
+      if (correctionDrifted) {
         await transition({
           ...current,
           ...clearedTerminalGate(),
@@ -5825,7 +6172,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
           pendingReviewCorrection: null,
         });
       }
-      return Object.freeze({ correctionScope, fingerprint });
+      return Object.freeze({ correctionScope, fingerprint, catalogBound });
     }
 
     function candidateReviewPrompt(evidence, correction) {
@@ -5861,14 +6208,23 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
       }
       const current = state();
       const correction = current.pendingReviewCorrection;
+      const checkpoint = candidateReviewCheckpoint(current);
+      // Keep the inspected scope after the retry is claimed and across
+      // recovery of an interrupted review.
+      const catalogScope = scope.catalogBound ? scope.correctionScope : null;
       try {
         const output = await runRole(
           "reviewer",
           CANDIDATE_REVIEW_SCHEMA,
           (evidence) => candidateReviewPrompt(evidence, correction),
           {
-            checkpoint:
-              correction === null ? "review" : "candidate-review-correction",
+            checkpoint,
+            candidateInfrastructureFingerprint:
+              scope.correctionScope.validationInfrastructureFingerprint,
+            verifyCandidateScope:
+              catalogScope === null
+                ? undefined
+                : () => verifiedCandidateScope(catalogScope),
             freshSession: correction !== null,
             recoveryContext: workContext({ includePolishSummary: true }),
           },
@@ -5880,7 +6236,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
           output,
           current.previousFindings,
         );
-        scope = await verifiedCandidateScope();
+        scope = await verifiedCandidateScope(catalogScope);
         if (scope === null) {
           return false;
         }
@@ -5892,6 +6248,11 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
         ) {
           throw cause;
         }
+        if (
+          catalogScope !== null &&
+          !(await verifiedCandidateScope(catalogScope))
+        )
+          return false;
         const diagnostics = outputDiagnostics(cause, context).slice(
           0,
           MAX_DIAGNOSTIC_ITEMS,
@@ -6072,13 +6433,12 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
         (correction !== null &&
           !reviewCorrectionMatchesScope(correction, scope))
       ) {
-        await restartFinalizationAfterConfirmationDrift(
+        return handleConfirmationScopeDrift(
           current,
           correction === null
             ? "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED"
             : "ERR_CONFIRMATION_CORRECTION_SCOPE_CHANGED",
         );
-        return true;
       }
       try {
         const output = await runRole(
@@ -6128,11 +6488,10 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
           return false;
         }
         if (confirmedValidationFingerprint !== inspectedValidationFingerprint) {
-          await restartFinalizationAfterConfirmationDrift(
+          return handleConfirmationScopeDrift(
             state(),
             "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
           );
-          return true;
         }
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "BOOTSTRAP");
@@ -6285,13 +6644,12 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
         (correction !== null &&
           !reviewCorrectionMatchesScope(correction, scope))
       ) {
-        await restartFinalizationAfterConfirmationDrift(
+        return handleConfirmationScopeDrift(
           current,
           correction === null
             ? "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED"
             : "ERR_CONFIRMATION_CORRECTION_SCOPE_CHANGED",
         );
-        return true;
       }
       try {
         const output = await runRole(
@@ -6403,11 +6761,10 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
       reviewedValidationFingerprint !==
       current.finalizationResult.validationInfrastructureFingerprint
     ) {
-      await restartFinalizationAfterConfirmationDrift(
+      return handleConfirmationScopeDrift(
         current,
         "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
       );
-      return true;
     }
     if (await routeFinalizationRejection(result, reviewedFingerprint))
       return true;
@@ -6901,14 +7258,13 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
       !continuingRepair &&
-      (retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
-        (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
-          true &&
-          !current.availabilityCorrectionCharged &&
-          counters().fixRounds >= fixBudget()));
+      resolutionFixBudgetExhausted(
+        current,
+        counters().fixRounds,
+        retryCheckpointEvidence()?.checkpoint,
+      );
     const blockers = activeBlockers();
     const nonDisputableIds = new Set(
       resolutionNonDisputableIds(current, blockers),
@@ -6981,7 +7337,8 @@ ${JSON.stringify(
       );
     } catch (cause) {
       if (
-        cause?.code !== "ERR_INVALID_POLISHING_OUTPUT" ||
+        (cause?.code !== "ERR_INVALID_POLISHING_OUTPUT" &&
+          !runtime.catalogRetry?.hasPossibleEffect(cause)) ||
         state().resolutionCorrection?.stage !== "ready"
       )
         throw cause;
@@ -7378,7 +7735,9 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       await publishResolutionReady(inspected, [
         INTERRUPTED_RESOLUTION_DIAGNOSTIC,
       ]);
-    } else if (!["ready", "correcting"].includes(checkpoint.stage)) {
+    } else if (
+      !["ready", "retry-ready", "correcting"].includes(checkpoint.stage)
+    ) {
       throw workflowError("Finding-resolution correction cannot continue.");
     }
     return restateResolution();
@@ -7439,7 +7798,11 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
         state().repositoryBaseline,
         {
           allowIndexChanges: false,
-          allowWorkspaceChanges: checkpoint.access === "workspace-write",
+          allowWorkspaceChanges:
+            checkpoint.access === "workspace-write" &&
+            !(
+              interruptedWritableNoEffect && interruptedTurn === run.activeTurn
+            ),
         },
       );
       if (
@@ -7490,7 +7853,9 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       state().repositoryBaseline,
       {
         allowWorkspaceChanges:
-          original && checkpoint.access === "workspace-write",
+          original &&
+          checkpoint.access === "workspace-write" &&
+          !interruptedWritableNoEffect,
         allowIndexChanges: false,
       },
     );
@@ -7512,19 +7877,58 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       return;
     }
     if (interruptedTurn !== null) {
-      // A stopped restatement was invoked and is consumed: it settles as lost
-      // before retirement, never as a pending provider retry.
+      const binding = {
+        role: "worker",
+        checkpoint: RESOLUTION_CORRECTION_CHECKPOINT,
+        resumeState: state().workflowState,
+      };
+      const rejection = operatorStopReadOnlyCatalogRejection;
       if (
-        checkpoint.stage === "correcting" &&
-        checkpoint.productDecision === null
-      )
-        await exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
-      currentRun = await finishAgentTurn(interruptedTurn);
+        rejection !== null &&
+        matchesResolutionRestatementCatalogAttempt(
+          currentRun,
+          binding,
+          rejection.turnStart,
+          rejection.attempt,
+        )
+      ) {
+        if (!(await verifyFinalizationGuidance())) return;
+        await pause("backend_unavailable", {
+          ...binding,
+          code: runtime.catalogRetry.code,
+        });
+        return;
+      }
+      const recovery = currentRun.inactivityRecovery;
+      const expired =
+        recovery?.expiryRevision < currentRun.stopRequest?.acceptedRevision &&
+        hasInterruptedRestatementExpiry(checkpoint);
+      if (expired && recovery.attempt === 2) {
+        await transition(
+          {
+            ...state(),
+            resolutionCorrection: { ...checkpoint, stage: "retry-ready" },
+          },
+          { nextActiveTurn: null },
+        );
+      } else {
+        if (
+          !expired &&
+          checkpoint.stage === "correcting" &&
+          checkpoint.productDecision === null
+        )
+          await exhaustResolutionCorrection([
+            INTERRUPTED_RESOLUTION_DIAGNOSTIC,
+          ]);
+        currentRun = await finishAgentTurn(interruptedTurn, {
+          expiredRestatement: expired,
+        });
+      }
       interruptedTurn = null;
     }
   }
 
-  async function exhaustResolutionCorrection(diagnostics) {
+  async function exhaustResolutionCorrection(diagnostics, options) {
     await pause(
       "resolution_output_invalid",
       {
@@ -7543,6 +7947,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           diagnostics: [...diagnostics],
         },
       },
+      options,
     );
     return false;
   }
@@ -7567,6 +7972,11 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     ) {
       return exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
     }
+    const continueEpisode =
+      checkpoint.stage === "ready" &&
+      isDeepStrictEqual(checkpoint.diagnostics, [
+        CATALOG_RESOLUTION_DIAGNOSTIC,
+      ]);
     if (checkpoint.stage === "ready") {
       if (checkpoint.attempts >= checkpoint.additionalAttempts + 1)
         return exhaustResolutionCorrection(
@@ -7574,15 +7984,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             ? checkpoint.diagnostics
             : [INTERRUPTED_RESOLUTION_DIAGNOSTIC],
         );
-      checkpoint = {
-        ...checkpoint,
-        stage: "correcting",
-        attempts: checkpoint.attempts + 1,
-        diagnostics:
-          checkpoint.diagnostics.length === 0
-            ? [INTERRUPTED_RESOLUTION_DIAGNOSTIC]
-            : checkpoint.diagnostics,
-      };
+      checkpoint = beginResolutionRestatement(checkpoint);
       await transition(
         { ...state(), resolutionCorrection: checkpoint },
         {
@@ -7610,6 +8012,7 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
         {
           access: "read-only",
           checkpoint: "finding-resolution-correction",
+          continueEpisode,
           freshSession: true,
           recoveryContext: workContext({ includePolishSummary: true }),
         },
@@ -7659,6 +8062,12 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
       if (!(await appendClarification())) return currentRun;
     }
     if (operatorStop) {
+      if (
+        interruptedTurn === null &&
+        currentRun.pause?.reason === "unsafe_git_state" &&
+        currentRun.pause.code === CATALOG_WORKSPACE_CHANGED
+      )
+        return currentRun;
       if (state().workflowState === "HANDOFF") {
         await runHandoff(true);
         return currentRun;
@@ -7678,7 +8087,7 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
         const inspected = await runtime.git.reconcileInterrupted(
           current.repositoryBaseline,
           {
-            allowWorkspaceChanges: writable,
+            allowWorkspaceChanges: writable && !interruptedWritableNoEffect,
             allowIndexChanges: false,
           },
         );
@@ -7796,12 +8205,32 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
             "HANDOFF",
           ].includes(currentRun.pause.resumeState))
       ) {
+        const correction = state().resolutionCorrection;
+        const providerPause = currentRun.pause;
+        const retryRestatement =
+          correction?.stage === "correcting" &&
+          correction.productDecision === null &&
+          providerPause.resumeState === "RESOLVE_FINDINGS" &&
+          (providerPause.reason === "authentication_required" ||
+            (providerPause.reason === "output_exhausted" &&
+              providerPause.role === "worker" &&
+              providerPause.checkpoint === RESOLUTION_CORRECTION_CHECKPOINT) ||
+            (providerPause.reason === "backend_unavailable" &&
+              [
+                "ERR_PROVIDER_INACTIVE",
+                "ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED",
+              ].includes(providerPause.code)));
         await transition(
           {
             ...state(),
             workflowState: state().preflightComplete
-              ? currentRun.pause.resumeState
+              ? providerPause.resumeState
               : "CLARIFY",
+            ...(retryRestatement
+              ? {
+                  resolutionCorrection: { ...correction, stage: "retry-ready" },
+                }
+              : {}),
           },
           { pause: null },
         );
@@ -8128,6 +8557,13 @@ ${evidence}`,
       return pause(interruptedControlChange(cause), { code: cause.code });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+      if (interruptedWritableNoEffect && interruptedTurn === run.activeTurn)
+        return pause(
+          "unsafe_git_state",
+          { code: CATALOG_WORKSPACE_CHANGED },
+          {},
+          { nextActiveTurn: null },
+        );
       const snapshotChanges = readOnlySnapshotChanges(runtime.git, cause);
       return pause("read_only_agent_mutated_repository", {
         code: cause.code,
@@ -8182,6 +8618,7 @@ function isOwnershipFailure(cause) {
     [
       "ERR_EXECUTION_PROCESS_ACTIVE",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
       "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
     ].includes(cause?.code)
   );

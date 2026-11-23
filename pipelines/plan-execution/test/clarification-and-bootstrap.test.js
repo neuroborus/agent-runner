@@ -6,6 +6,8 @@ import test from "node:test";
 import { createGitService } from "../../../src/git/index.js";
 import { getPipeline } from "../../../src/index.js";
 import { createClarificationService } from "../../../src/clarifications/index.js";
+import { preparePipelineMigration } from "../../../src/runner/migration.js";
+import { MODEL_CATALOG_RETRY_CODE } from "../../../src/state/index.js";
 import { restoredAppendReadback } from "../../../test/support/clarification-readback.js";
 import {
   createPlanExecutionState,
@@ -17,6 +19,7 @@ import { FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
+  appendCheckpointFingerprint,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
@@ -1896,6 +1899,108 @@ test("verifies frozen inputs at the implementation boundary", async (t) => {
   assert.equal(result.pipelineState.currentStep, null);
   assert.equal(result.pipelineState.resolvedSummary, null);
 });
+
+for (const version of [43, 45]) {
+  test(`version ${version} clarification append recovery preserves the verified intent`, async (t) => {
+    const interruption = new Error("Interrupted after transcript replacement.");
+    const f = await createFixture(t, { worker: [clarificationQuestions()] });
+    const service = f.runtime.clarifications;
+    f.runtime.clarifications = {
+      ...service,
+      async appendQuestionRound(options) {
+        await service.appendQuestionRound(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(f.run(), (cause) => cause === interruption);
+    const legacy = structuredClone(f.currentRun);
+    legacy.pipelineStateVersion = version;
+    legacy.modelCompletionReceipts = {};
+    delete legacy.pipelineState.validationMigrationDisagreement;
+    if (version === 43) delete legacy.pipelineState.clarificationRoot;
+    const intent = legacy.pipelineState.pendingClarificationAppend;
+    const fingerprint = appendCheckpointFingerprint(
+      legacy,
+      intent.checkpoint.workflowState,
+    );
+    intent.checkpoint.fingerprint = "0".repeat(64);
+    assert.throws(
+      () => preparePipelineMigration(legacy, planExecutionPipeline),
+      {
+        code: "ERR_PIPELINE_MIGRATION_FAILED",
+      },
+    );
+    intent.checkpoint.fingerprint = fingerprint;
+
+    const migrated = preparePipelineMigration(legacy, planExecutionPipeline);
+    const rebound = migrated.pipelineState.pendingClarificationAppend;
+    assert.equal(
+      migrated.pipelineState.clarificationRoot,
+      legacy.pipelineState.repositoryBaseline.projectPath,
+    );
+    assert.notEqual(rebound.checkpoint.fingerprint, fingerprint);
+    assert.deepEqual(rebound, {
+      ...intent,
+      checkpoint: {
+        ...intent.checkpoint,
+        fingerprint: rebound.checkpoint.fingerprint,
+      },
+    });
+    planExecutionPipeline.assertCatalogTransition(
+      legacy,
+      migrated,
+      null,
+      MODEL_CATALOG_RETRY_CODE,
+    );
+    assert.throws(
+      () =>
+        planExecutionPipeline.assertCatalogTransition(
+          legacy,
+          {
+            ...migrated,
+            pipelineState: {
+              ...migrated.pipelineState,
+              pendingClarificationAppend: {
+                ...rebound,
+                resultHash: "0".repeat(64),
+              },
+            },
+          },
+          null,
+          MODEL_CATALOG_RETRY_CODE,
+        ),
+      /migration changed the clarification append intent/u,
+    );
+    assert.throws(
+      () =>
+        planExecutionPipeline.assertCatalogTransition(
+          legacy,
+          {
+            ...migrated,
+            pipelineState: {
+              ...migrated.pipelineState,
+              clarificationRoot: null,
+            },
+          },
+          null,
+          MODEL_CATALOG_RETRY_CODE,
+        ),
+      /migration changed the clarification append checkpoint/u,
+    );
+    const transcript = f.readClarification();
+    assert.equal(hash(transcript), intent.resultHash);
+    const calls = f.calls.worker.length;
+    f.runtime.clarifications = service;
+    f.persistPipelineState(migrated.pipelineState);
+    const recovered = await f.run();
+    assert.equal(recovered.pause.reason, "clarification_answers_required");
+    assert.equal(recovered.pipelineState.pendingClarificationAppend, null);
+    assert.equal(recovered.hashes.executionClarifications, intent.resultHash);
+    assert.equal(recovered.counters.clarificationRounds, 1);
+    assert.equal(f.readClarification(), transcript);
+    assert.equal(f.calls.worker.length, calls);
+  });
+}
 
 for (const [kind, boundary, mode] of [
   ["questions", "intent", "combined"],

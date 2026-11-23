@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  reconcileOperatorStop,
+  restoreOperatorPause,
+} from "../../../src/runner/stops.js";
+import { matchesObservedInactivityExpiry } from "../../../src/state/index.js";
+import { nextCatalogResume } from "../../../src/state/model-completion.js";
+import { beginObservationAttempt } from "../../../src/state/observations.js";
 import {
   attachAuthentication,
   authenticationFailure,
@@ -12,6 +20,7 @@ import {
   availabilityFailure,
 } from "../../../test/support/availability.js";
 import { attachInactivity } from "../../../test/support/inactivity.js";
+import { modelCatalogMiss } from "../../../test/support/model-catalog.js";
 import {
   attachOutputExhaustion,
   outputExhaustion,
@@ -25,7 +34,11 @@ import {
   FINDING_RESOLUTION_SCHEMA,
   FINDING_RECOVERY_SCHEMA,
 } from "../src/schemas.js";
-import { normalizeResolutionResult } from "../src/workflow-contract.js";
+import {
+  CATALOG_RESOLUTION_DIAGNOSTIC,
+  normalizeResolutionResult,
+  RESOLUTION_CORRECTION_CHECKPOINT,
+} from "../src/workflow-contract.js";
 import {
   SETTINGS,
   bootstrapReady,
@@ -213,8 +226,11 @@ test("legacy blocked recovery preserves unfinished bytes until one new repair is
 for (const [reason, attach, failure] of [
   ["authentication_required", attachAuthentication, authenticationFailure],
   ["output_exhausted", attachOutputExhaustion, outputExhaustion],
+  ["resolution_output_invalid", null, modelCatalogMiss],
 ]) {
   test(`${reason} during a continued repair retains its consumed recovery checkpoint`, async (t) => {
+    const catalog = attach === null;
+    const failureCause = failure();
     let writes = 0;
     const fixture = await createFixture(t, {
       ...terminalFindingFlow("independent", [
@@ -227,14 +243,26 @@ for (const [reason, attach, failure] of [
         if (!isResolution(request) || request.access !== "workspace-write")
           return;
         writes++;
+        if (catalog && writes === 2) throw failureCause;
         await writeFile(
           join(projectPath, "repair.txt"),
           writes === 1 ? "unfinished\n" : "fixed\n",
         );
-        if (writes === 2) throw failure();
+        if (writes === 2) throw failureCause;
       },
     });
-    attach(fixture);
+    if (catalog) {
+      const code = "ERR_MODEL_CATALOG_RETRY";
+      fixture.runtime.catalogRetry = {
+        code,
+        eligible: (cause) => cause === failureCause,
+        hasWritableNoEffect: ({ phase }) => phase === "resolve-findings",
+        hasPossibleEffect: () => false,
+        resuming: () => false,
+        claimResume: () => false,
+        details: (role, checkpoint) => ({ code, role, checkpoint }),
+      };
+    } else attach(fixture);
     const required = await fixture.run();
     assert.equal(required.pause.reason, "finding_repair_required");
     const predecessor = required.pipelineState.resolutionCorrection;
@@ -244,7 +272,7 @@ for (const [reason, attach, failure] of [
     assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
     assert.equal(paused.activeTurn, null);
     const checkpoint = paused.pipelineState.resolutionCorrection;
-    assert.equal(checkpoint?.stage, "ready");
+    assert.equal(checkpoint?.stage, catalog ? "exhausted" : "ready");
     assert.equal(checkpoint.repair, predecessor.repair);
     assert.deepEqual(checkpoint.blockers, predecessor.blockers);
     assert.equal(checkpoint.attempts, predecessor.attempts);
@@ -254,12 +282,16 @@ for (const [reason, attach, failure] of [
     assert.equal(paused.counters.fixRounds, 1);
     assert.equal(
       await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
-      "fixed\n",
+      catalog ? "unfinished\n" : "fixed\n",
     );
 
     // The first read-only recovery allowance is still consumed.
-    const exhausted = await fixture.run();
+    const exhausted = catalog ? paused : await fixture.run();
     assert.equal(exhausted.pause.reason, "resolution_output_invalid");
+    assert.deepEqual(
+      polishingPipeline.projections.pause(exhausted).nextActions,
+      [{ type: "resume", action: null }],
+    );
     assert.equal(writes, 2);
     assert.equal(resolutionCalls(fixture).length, 3);
     const completed = await fixture.run();
@@ -457,7 +489,7 @@ for (const publication of [
     assert.equal(reloaded.pause, null);
     assert.deepEqual(
       reloaded.activeTurn,
-      ["invocation", "restatement"].includes(publication)
+      ["invocation", "reconciliation", "restatement"].includes(publication)
         ? { role: "worker", phase: "resolve-findings" }
         : null,
     );
@@ -962,6 +994,262 @@ test("process loss during a reconstructed original keeps the consumed allowance"
   assert.deepEqual(
     resolutionCalls(fixture).map(({ access }) => access),
     ["workspace-write", "read-only"],
+  );
+});
+
+for (const publication of ["reconciliation", "turn retirement"]) {
+  test(`a lost catalog ${publication} acknowledgement preserves the original reconstruction`, async (t) => {
+    const catalogMiss = new Error(
+      "Model catalog lookup failed during recovery.",
+    );
+    const fixture = await createFixture(t, {
+      ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (!isResolution(request) || request.access !== "workspace-write")
+          return;
+        assert.equal(await request.onFreshSession(), true);
+        await writeRepair(request, projectPath);
+        throw catalogMiss;
+      },
+    });
+    fixture.runtime.catalogRetry = {
+      eligible: () => false,
+      hasWritableNoEffect: () => false,
+      hasPossibleEffect: (cause) => cause === catalogMiss,
+      resuming: () => false,
+      claimResume: () => false,
+    };
+    const inactivity = await attachInactivity(fixture);
+    const loss = new Error(`Resolution ${publication} acknowledgement lost.`);
+    const { transition, finishAgentTurn } = fixture.runtime;
+    const lostReconciliation = publication === "reconciliation";
+    if (lostReconciliation) {
+      fixture.runtime.transition = async (...args) => {
+        const next = await transition(...args);
+        if (next.pipelineState.resolutionCorrection?.stage === "ready") {
+          fixture.runtime.transition = transition;
+          throw loss;
+        }
+        return next;
+      };
+    } else {
+      fixture.runtime.finishAgentTurn = async (...args) => {
+        const next = await finishAgentTurn(...args);
+        if (next.pipelineState.resolutionCorrection?.stage === "ready") {
+          fixture.runtime.finishAgentTurn = finishAgentTurn;
+          throw loss;
+        }
+        return next;
+      };
+    }
+
+    await assert.rejects(fixture.run(), (error) => error === loss);
+    assert.equal(fixture.currentRun.pause, null);
+    assert.equal(
+      fixture.currentRun.pipelineState.resolutionCorrection.stage,
+      "ready",
+    );
+    assert.equal(
+      fixture.currentRun.activeTurn?.phase ?? null,
+      lostReconciliation ? "resolve-findings" : null,
+    );
+    assert.equal(fixture.currentRun.counters.fixRounds, 1);
+    assert.equal(fixture.currentRun.inactivityRecovery.attempt, 2);
+    inactivity.restart();
+
+    const completed = await fixture.run();
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.equal(completed.counters.fixRounds, 1);
+    assert.equal(completed.inactivityRecovery, null);
+    assert.deepEqual(
+      resolutionCalls(fixture).map(({ access }) => access),
+      ["workspace-write", "read-only"],
+    );
+    assert.equal(
+      inactivity.events.filter(({ kind }) => kind === "reconstructing").length,
+      1,
+    );
+  });
+}
+
+test("a lost no-effect catalog reconciliation retains the spent reconstruction", async (t) => {
+  const miss = new Error(
+    "Model catalog lookup failed before thread selection.",
+  );
+  const loss = new Error("Resolution reconciliation acknowledgement lost.");
+  let inactivity;
+  let writable = 0;
+  const fixture = await createFixture(t, {
+    ...terminalFindingFlow("independent", [resolution("FIX", "R1")], {
+      refinalize: false,
+    }),
+    async onRoleRun(_role, request) {
+      if (!isResolution(request) || request.access !== "workspace-write")
+        return;
+      if (++writable === 1) return inactivity.expire(request);
+      throw miss;
+    },
+  });
+  const code = "ERR_MODEL_CATALOG_RETRY";
+  fixture.runtime.catalogRetry = {
+    code,
+    eligible: (cause) => cause === miss,
+    hasWritableNoEffect: () => writable === 2,
+    hasPossibleEffect: () => false,
+    details: (role, checkpoint) => ({ code, role, checkpoint }),
+    resuming: () => false,
+    claimResume: () => false,
+  };
+  inactivity = await attachInactivity(fixture);
+  const { transition } = fixture.runtime;
+  fixture.runtime.transition = async (...args) => {
+    const next = await transition(...args);
+    if (next.pipelineState.resolutionCorrection?.stage === "ready") {
+      fixture.runtime.transition = transition;
+      throw loss;
+    }
+    return next;
+  };
+
+  await assert.rejects(fixture.run(), (cause) => cause === loss);
+  const interrupted = fixture.currentRun;
+  assert.equal(interrupted.pause, null);
+  assert.equal(interrupted.activeTurn.phase, "resolve-findings");
+  assert.equal(interrupted.pipelineState.resolutionCorrection.stage, "ready");
+  assert.equal(interrupted.inactivityRecovery.attempt, 2);
+  assert.equal(interrupted.counters.fixRounds, 0);
+  inactivity.restart();
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(completed.inactivityRecovery, null);
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "workspace-write", "read-only"],
+  );
+  assert.equal(
+    inactivity.events.filter(({ kind }) => kind === "reconstructing").length,
+    1,
+  );
+});
+
+test("a first expiry racing a no-effect catalog miss keeps its episode after a lost acknowledgement", async (t) => {
+  const miss = new Error(
+    "Model catalog lookup failed before thread selection.",
+  );
+  const loss = new Error("Resolution reconciliation acknowledgement lost.");
+  let inactivity;
+  const fixture = await createFixture(t, {
+    ...terminalFindingFlow("independent", [resolution("FIX", "R1")], {
+      refinalize: false,
+    }),
+    async onRoleRun(_role, request) {
+      if (!isResolution(request) || request.access !== "workspace-write")
+        return;
+      // The watchdog journals the first expiry before the miss settles.
+      await inactivity.expire(request).catch(() => {});
+      throw miss;
+    },
+  });
+  const code = "ERR_MODEL_CATALOG_RETRY";
+  fixture.runtime.catalogRetry = {
+    code,
+    eligible: (cause) => cause === miss,
+    hasWritableNoEffect: () => true,
+    hasPossibleEffect: () => false,
+    details: (role, checkpoint) => ({ code, role, checkpoint }),
+    resuming: () => false,
+    claimResume: () => false,
+  };
+  inactivity = await attachInactivity(fixture);
+  const { transition } = fixture.runtime;
+  fixture.runtime.transition = async (...args) => {
+    const next = await transition(...args);
+    if (next.pipelineState.resolutionCorrection?.stage === "ready") {
+      fixture.runtime.transition = transition;
+      throw loss;
+    }
+    return next;
+  };
+
+  await assert.rejects(fixture.run(), (cause) => cause === loss);
+  const interrupted = fixture.currentRun;
+  assert.equal(interrupted.pause, null);
+  assert.deepEqual(interrupted.pipelineState.resolutionCorrection.diagnostics, [
+    CATALOG_RESOLUTION_DIAGNOSTIC,
+  ]);
+  assert.equal(interrupted.inactivityRecovery.status, "expired");
+  assert.equal(interrupted.inactivityRecovery.attempt, 1);
+  inactivity.restart();
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.inactivityRecovery, null);
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
+  assert.equal(
+    inactivity.events.filter(({ kind }) => kind === "reconstructing").length,
+    0,
+  );
+});
+
+test("polishing retains a catalog resume after its publication acknowledgement is lost", async (t) => {
+  const lostOutput = new Error("Catalog miss during recovery.");
+  const miss = new Error("Catalog miss before the read-only retry.");
+  const lostAcknowledgement = new Error("Resume acknowledgement lost.");
+  const code = "ERR_MODEL_CATALOG_RETRY";
+  let reports = 0;
+  let binding = null;
+  const fixture = await createFixture(t, {
+    ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
+    async onRoleRun(_role, request, _turn, { projectPath }) {
+      if (!isResolution(request)) return;
+      if (request.access === "workspace-write") {
+        await writeRepair(request, projectPath);
+        throw lostOutput;
+      }
+      if (++reports === 1) throw miss;
+    },
+  });
+  const resuming = (role, checkpoint) =>
+    binding?.role === role && binding.checkpoint === checkpoint;
+  fixture.runtime.catalogRetry = {
+    code,
+    eligible: (cause) => cause === miss,
+    hasWritableNoEffect: () => false,
+    hasPossibleEffect: (cause) => cause === lostOutput,
+    details: (role, checkpoint) => ({ code, role, checkpoint }),
+    resuming,
+    claimResume: resuming,
+  };
+
+  const paused = await fixture.run();
+  assert.equal(paused.pause.code, code);
+  const transition = fixture.runtime.transition;
+  fixture.runtime.transition = async (patch, options) => {
+    const next = await transition(patch, options);
+    if (patch.pause === null) throw lostAcknowledgement;
+    return next;
+  };
+  await assert.rejects(fixture.run(), (cause) => cause === lostAcknowledgement);
+  assert.equal(fixture.currentRun.pause, null);
+  assert.equal(fixture.currentRun.activeTurn, null);
+  assert.equal(
+    fixture.currentRun.pipelineState.resolutionCorrection.attempts,
+    1,
+  );
+  assert.equal(reports, 1);
+
+  // Simulate the common journal's retained binding when reopening the run.
+  binding = paused.pause;
+  fixture.runtime.transition = transition;
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.fixRounds, 1);
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only", "read-only"],
   );
 });
 
@@ -1528,67 +1816,804 @@ test("an exhausted-budget read-only original restated as FIX reaches the fix lim
   );
 });
 
-test("a restatement backoff kept at its original checkpoint resumes after process loss", async (t) => {
-  let process;
-  let original = 0;
-  let restated = 0;
-  const fixture = await createFixture(t, {
-    ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
-    async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (!isResolution(request)) return;
-      if (request.access === "workspace-write") {
-        original += 1;
-        if (original === 1) throw availabilityFailure();
-        await writeRepair(request, projectPath);
-        throw Object.assign(new Error("Synthetic interrupted provider."), {
-          code: "ERR_SYNTHETIC_PROVIDER_INTERRUPTED",
-          recoverable: true,
-          ambiguous: true,
+for (const interruption of [
+  "before backoff",
+  "after backoff",
+  "after terminal rejection retirement",
+  "after authentication",
+  "after output exhaustion",
+]) {
+  test(`cold catalog restatement recovery ${interruption} uses only current backoff`, async (t) => {
+    const published = interruption === "after backoff";
+    const rejected = interruption === "after terminal rejection retirement";
+    const unauthenticated = interruption === "after authentication";
+    const exhausted = interruption === "after output exhaustion";
+    const isProviderPause = unauthenticated || exhausted;
+    const miss = new Error("Catalog miss before read-only invocation.");
+    const loss = Object.assign(
+      new Error("Restatement settlement interrupted."),
+      { code: "ERR_AVAILABILITY_RECOVERY" },
+    );
+    const code = "ERR_MODEL_CATALOG_RETRY";
+    let original = 0;
+    let restated = 0;
+    let binding = null;
+    const fixture = await createFixture(t, {
+      ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (!isResolution(request)) return;
+        if (request.access === "workspace-write") {
+          if (++original === 1) {
+            if (rejected) await writeRepair(request, projectPath);
+            throw availabilityFailure();
+          }
+          await writeRepair(request, projectPath);
+          throw Object.assign(new Error("Synthetic interrupted provider."), {
+            recoverable: true,
+          });
+        }
+        if (++restated === 1) throw miss;
+        if (restated === 2 || (isProviderPause && restated === 3)) {
+          if (rejected) throw new Error("Terminal provider rejection.");
+          if (unauthenticated && restated === 2) throw authenticationFailure();
+          if (exhausted && restated === 2) throw outputExhaustion();
+          throw availabilityFailure();
+        }
+      },
+    });
+    const resuming = (role, checkpoint) =>
+      binding?.role === role && binding.checkpoint === checkpoint;
+    fixture.runtime.catalogRetry = {
+      code,
+      eligible: (cause) => cause === miss,
+      hasWritableNoEffect: () => false,
+      hasPossibleEffect: () => false,
+      details: (role, checkpoint) => ({ code, role, checkpoint }),
+      resuming,
+      claimResume(role, checkpoint) {
+        if (binding === null) return false;
+        assert.equal(resuming(role, checkpoint), true);
+        binding = null;
+        return true;
+      },
+    };
+    if (unauthenticated) attachAuthentication(fixture);
+    if (exhausted) attachOutputExhaustion(fixture);
+    const availability = attachAvailability(fixture);
+
+    const lost = await fixture.run();
+    assert.equal(lost.pipelineState.resolutionCorrection.stage, "ready");
+    const paused = await fixture.run();
+    assert.equal(paused.pause.code, code);
+    const episode = paused.availabilityRetry;
+    assert.equal(episode.checkpoint, "resolve-findings:workspace-write:work");
+    assert.equal(episode.attempt, 1);
+    if (rejected)
+      assert.equal(
+        episode.contentFingerprint,
+        paused.pipelineState.repositoryBaseline.contentFingerprint,
+      );
+    binding = paused.pause;
+
+    if (isProviderPause) {
+      const suspended = await fixture.run();
+      assert.equal(
+        suspended.pause.reason,
+        exhausted ? "output_exhausted" : "authentication_required",
+      );
+      assert.equal(suspended.activeTurn, null);
+      assert.equal(suspended.pipelineState.resolutionCorrection.attempts, 1);
+      assert.deepEqual(suspended.availabilityRetry, exhausted ? episode : null);
+
+      const transition = fixture.runtime.transition;
+      fixture.runtime.transition = async (patch, options) => {
+        const next = await transition(patch, options);
+        if (patch.pause === null) throw loss;
+        return next;
+      };
+      await assert.rejects(fixture.run(), (cause) => cause === loss);
+      fixture.runtime.transition = transition;
+      assert.equal(fixture.currentRun.pause, null);
+      assert.equal(fixture.currentRun.activeTurn, null);
+      assert.equal(restated, 2);
+
+      const recovered = await fixture.run();
+      assert.equal(recovered.pipelineState.workflowState, "DONE");
+      assert.equal(recovered.counters.fixRounds, 1);
+      assert.equal(recovered.availabilityRetry, null);
+      assert.equal(original, 2);
+      assert.equal(restated, 4);
+      assert.deepEqual(availability.delays, [5000, exhausted ? 7000 : 5000]);
+      assert.equal(availability.scheduled.length, 2);
+      const retry = availability.scheduled[1];
+      assert.equal(retry.availabilityRetry.id === episode.id, exhausted);
+      assert.equal(
+        retry.availabilityRetry.checkpoint,
+        exhausted ? episode.checkpoint : RESOLUTION_CORRECTION_CHECKPOINT,
+      );
+      assert.equal(retry.availabilityRetry.attempt, exhausted ? 2 : 1);
+      assert.equal(retry.pipelineState.resolutionCorrection.attempts, 1);
+      assert.equal(
+        retry.availabilityRetry.contentFingerprint,
+        suspended.pipelineState.repositoryBaseline.contentFingerprint,
+      );
+      return;
+    }
+
+    const coordinator = fixture.runtime.availability;
+    const finish = fixture.runtime.finishAgentTurn;
+    fixture.runtime.availability = {
+      ...coordinator,
+      async schedule(options) {
+        if (published) await coordinator.schedule(options);
+        throw loss;
+      },
+    };
+    if (rejected) {
+      fixture.runtime.finishAgentTurn = async (...args) => {
+        await finish(...args);
+        throw loss;
+      };
+    }
+    await assert.rejects(fixture.run(), (cause) => cause === loss);
+    fixture.runtime.availability = coordinator;
+    fixture.runtime.finishAgentTurn = finish;
+    assert.equal(binding, null);
+    const interrupted = fixture.currentRun;
+    assert.equal(
+      interrupted.activeTurn?.phase ?? null,
+      published || rejected ? null : "resolve-findings",
+    );
+    assert.equal(
+      interrupted.pipelineState.resolutionCorrection.stage,
+      "correcting",
+    );
+    assert.equal(interrupted.pipelineState.resolutionCorrection.attempts, 1);
+    assert.equal(interrupted.availabilityRetry.id, episode.id);
+    assert.equal(interrupted.availabilityRetry.checkpoint, episode.checkpoint);
+    assert.equal(interrupted.availabilityRetry.attempt, published ? 2 : 1);
+
+    const recovered = await fixture.run();
+    assert.equal(recovered.counters.fixRounds, 1);
+    assert.equal(restated, published ? 3 : 2);
+    if (published) {
+      assert.equal(recovered.pipelineState.workflowState, "DONE");
+      assert.equal(recovered.availabilityRetry, null);
+      assert.deepEqual(availability.delays, [5000, 7000]);
+    } else {
+      assert.equal(recovered.pause.reason, "resolution_output_invalid");
+      assert.deepEqual(recovered.pause.evidence, [LOST_EVIDENCE]);
+      assert.deepEqual(recovered.availabilityRetry, episode);
+      assert.deepEqual(availability.delays, [5000]);
+    }
+    assert.equal(availability.scheduled.length, published ? 2 : 1);
+    assert.equal(original, 2);
+  });
+}
+
+async function legacyResolutionEvents(fixture) {
+  const path = join(fixture.directoryPath, "events.jsonl");
+  const events = (await readFile(path, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  for (const event of events) {
+    const { state } = event;
+    event.schemaVersion = 27;
+    state.schemaVersion = 27;
+    state.runtimeCompatibility.runStateVersion = 27;
+    delete state.modelCompletionReceipts;
+    delete state.modelCatalogResume;
+    state.pipelineStateVersion = 24;
+    const correction = state.pipelineState.resolutionCorrection;
+    if (correction !== null) {
+      correction.schemaVersion = 1;
+      delete correction.repair;
+      delete correction.factsFingerprint;
+      delete correction.restatementStartedAfter;
+    }
+  }
+  return events;
+}
+
+function appendLegacyEvent(events, patch, activity) {
+  const last = events.at(-1);
+  const revision = last.revision + 1;
+  const state = { ...last.state, ...patch, revision };
+  events.push({
+    ...last,
+    revision,
+    recordedAt: state.updatedAt,
+    state,
+    activity,
+  });
+}
+
+async function persistLegacyResolutionEvents(fixture, events) {
+  await writeFile(
+    join(fixture.directoryPath, "events.jsonl"),
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+  );
+  await writeFile(
+    join(fixture.directoryPath, "state.json"),
+    `${JSON.stringify(events.at(-1).state)}\n`,
+  );
+}
+
+async function migrateLegacyResolution(store, lease, legacy) {
+  assert.equal(legacy.schemaVersion, 27);
+  assert.equal(legacy.pipelineStateVersion, 24);
+  const run = await store.migrateRun(
+    lease,
+    {
+      pipelineState: polishingPipeline.migrations[24](legacy),
+      pipelineStateVersion: 25,
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "runtime",
+        kind: "migrated",
+        message: "Migrated common version 27 and polishing version 24.",
+      },
+    },
+  );
+  polishingPipeline.workflow.validateRun(run);
+  return run;
+}
+
+for (const stale of [false, true]) {
+  test(`common version 27 restatement backoff is ${stale ? "stale after a later turn" : "resumed after migration"}`, async (t) => {
+    const loss = Object.assign(new Error("Owner lost."), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const unavailable = availabilityFailure();
+    let readOnlyCalls = 0;
+    let scheduled;
+    const fixture = await createRealStoreFixture(t, {
+      ...terminalFindingFlow("independent", [invalidResolution()]),
+      onRoleRun(_role, request) {
+        if (!isResolution(request) || request.access !== "read-only") return;
+        if (++readOnlyCalls === 1) throw unavailable;
+        throw loss;
+      },
+    });
+    fixture.runtime.availability = {
+      eligible: (cause) => cause === unavailable,
+      async schedule({ role, checkpoint, repository, reconciledTurn }) {
+        await fixture.runtime.finishAgentTurn(reconciledTurn);
+        scheduled = { role, checkpoint, repository };
+        throw loss;
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === loss);
+    assert.equal(fixture.currentRun.activeTurn, null);
+    assert.equal(
+      fixture.currentRun.pipelineState.resolutionCorrection.attempts,
+      1,
+    );
+
+    // Version 27 recorded retirement and backoff separately, without a start marker.
+    const events = await legacyResolutionEvents(fixture);
+    const retired = events.at(-1);
+    const invocation = events.findLast(
+      ({ activity }) => activity?.kind === "turn-started",
+    );
+    const delayMs = 5_000;
+    const episode = {
+      id: randomUUID(),
+      role: scheduled.role,
+      checkpoint: scheduled.checkpoint,
+      reason: "temporarily_overloaded",
+      attempt: 1,
+      delayMs,
+      scheduledAt: retired.recordedAt,
+      nextRetryAt: new Date(
+        Date.parse(retired.recordedAt) + delayMs,
+      ).toISOString(),
+      contentFingerprint: scheduled.repository.contentFingerprint,
+      reconciledRevision: retired.revision,
+    };
+    appendLegacyEvent(
+      events,
+      { availabilityRetry: episode },
+      {
+        actor: "worker",
+        phase: "availability",
+        kind: "retry-scheduled",
+        message: "Scheduled read-only restatement backoff.",
+      },
+    );
+    if (stale) {
+      appendLegacyEvent(
+        events,
+        { updatedAt: episode.nextRetryAt },
+        {
+          actor: "worker",
+          phase: "availability",
+          kind: "retry-started",
+          message: "Completed the recorded backoff.",
+        },
+      );
+      appendLegacyEvent(
+        events,
+        { activeTurn: invocation.state.activeTurn },
+        invocation.activity,
+      );
+      appendLegacyEvent(events, { activeTurn: null }, null);
+    }
+    await persistLegacyResolutionEvents(fixture, events);
+
+    await fixture.recover(async (store, lease, legacy) => {
+      const run = await migrateLegacyResolution(store, lease, legacy);
+      const history = await store.loadRunHistory(run.runId, { stream: true });
+      await polishingPipeline.prepareRecovery(run, history);
+      return run;
+    });
+    let backoffCalls = 0;
+    fixture.runtime.availability.before = async ({ role, checkpoint }) => {
+      assert.equal(role, episode.role);
+      assert.equal(checkpoint, episode.checkpoint);
+      assert.deepEqual(fixture.currentRun.availabilityRetry, episode);
+      backoffCalls++;
+      return fixture.currentRun;
+    };
+    if (stale) {
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "resolution_output_invalid");
+      assert.equal(backoffCalls, 0);
+      assert.equal(readOnlyCalls, 1);
+    } else {
+      await assert.rejects(fixture.run(), (cause) => cause === loss);
+      assert.equal(backoffCalls, 1);
+      assert.equal(readOnlyCalls, 2);
+    }
+    assert.deepEqual(fixture.currentRun.availabilityRetry, episode);
+    assert.equal(
+      fixture.currentRun.pipelineState.resolutionCorrection.attempts,
+      1,
+    );
+  });
+}
+
+for (const scenario of ["cold", "stop", "mismatched", "stale"]) {
+  test(`common version 27 restatement watchdog expiry handles ${scenario} recovery`, async (t) => {
+    const loss = Object.assign(new Error("Owner lost."), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    let restatements = 0;
+    const fixture = await createRealStoreFixture(t, {
+      ...terminalFindingFlow("independent", [invalidResolution()]),
+      onRoleRun(_role, request) {
+        if (!isResolution(request) || request.access !== "read-only") return;
+        restatements++;
+        throw loss;
+      },
+    });
+    fixture.runtime.matchesObservedInactivityExpiry =
+      matchesObservedInactivityExpiry;
+    await assert.rejects(fixture.run(), (cause) => cause === loss);
+    const events = await legacyResolutionEvents(fixture);
+    const invocation = events.at(-1);
+    assert.equal(invocation.activity.kind, "turn-started");
+    const attempt = {
+      role: "worker",
+      checkpoint: RESOLUTION_CORRECTION_CHECKPOINT,
+    };
+    const observations = beginObservationAttempt(invocation.state, attempt);
+    appendLegacyEvent(
+      events,
+      { observations },
+      {
+        actor: "worker",
+        phase: "observations",
+        kind: "active",
+        message: "Read-only provider attempt started.",
+      },
+    );
+    const expiry = {
+      ...attempt,
+      checkpoint:
+        scenario === "mismatched"
+          ? "resolve-findings:workspace-write:work"
+          : attempt.checkpoint,
+      attempt: 1,
+      status: "expired",
+      reconstructionRevision: null,
+      expiryRevision: events.at(-1).revision + 1,
+      configurationFingerprint: invocation.state.providerInactivityFingerprint,
+      contentFingerprint:
+        invocation.state.pipelineState.repositoryBaseline.contentFingerprint,
+    };
+    appendLegacyEvent(
+      events,
+      { inactivityRecovery: expiry },
+      {
+        actor: "worker",
+        phase: "inactivity",
+        kind: "expired",
+        message: "Provider attempt expired.",
+      },
+    );
+    if (scenario === "stale") {
+      appendLegacyEvent(events, { activeTurn: null }, null);
+      appendLegacyEvent(
+        events,
+        { activeTurn: invocation.state.activeTurn },
+        invocation.activity,
+      );
+    }
+    await persistLegacyResolutionEvents(fixture, events);
+
+    let interrupted;
+    let reconstructions = 0;
+    await fixture.recover(async (store, lease, legacy) => {
+      const run = await migrateLegacyResolution(store, lease, legacy);
+      interrupted = run;
+      let ready = run;
+      if (scenario === "stop") {
+        await store.requestOperatorStop({
+          runId: run.runId,
+          kind: "pause_requested",
+          expectedRevision: run.revision,
+          idempotencyKey: "pause-expired-restatement",
         });
+        const stopped = await reconcileOperatorStop({
+          run,
+          pipeline: polishingPipeline,
+          lease,
+          runStore: store,
+          runtime: fixture.runtime,
+          publish: async () => {},
+        });
+        assert.equal(stopped.pause.reason, "operator_paused");
+        assert.equal(stopped.pause.operatorResume.pause, null);
+        assert.equal(stopped.activeTurn, null);
+        assert.equal(
+          stopped.pipelineState.resolutionCorrection.stage,
+          "correcting",
+        );
+        assert.equal(restatements, 1);
+        ready = await store.transitionRun(lease, restoreOperatorPause(stopped));
       }
-      restated += 1;
-      if (restated === 1) throw availabilityFailure();
-    },
+      const history = await store.loadRunHistory(run.runId, { stream: true });
+      await polishingPipeline.prepareRecovery(ready, history);
+      fixture.runtime.inactivity = {
+        before({ role, checkpoint, continueEpisode }) {
+          assert.equal(role, expiry.role);
+          assert.equal(checkpoint, expiry.checkpoint);
+          assert.equal(continueEpisode, false);
+          assert.deepEqual(fixture.currentRun.inactivityRecovery, expiry);
+          reconstructions++;
+          return store.recordInactivity(
+            lease,
+            { ...expiry, attempt: 2, status: "reconstructing" },
+            "reconstructing",
+          );
+        },
+      };
+      return ready;
+    });
+    if (scenario === "cold" || scenario === "stop") {
+      await assert.rejects(fixture.run(), (cause) => cause === loss);
+      assert.equal(reconstructions, 1);
+      assert.equal(restatements, 2);
+      assert.equal(fixture.currentRun.inactivityRecovery.attempt, 2);
+      assert.equal(
+        fixture.currentRun.inactivityRecovery.expiryRevision,
+        expiry.expiryRevision,
+      );
+      assert.equal(
+        fixture.currentRun.pipelineState.resolutionCorrection.stage,
+        "correcting",
+      );
+    } else {
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "resolution_output_invalid");
+      assert.deepEqual(paused.pause.evidence, [LOST_EVIDENCE]);
+      assert.equal(reconstructions, 0);
+      assert.equal(restatements, 1);
+    }
+    assert.deepEqual(fixture.currentRun.counters, interrupted.counters);
+    const correction = fixture.currentRun.pipelineState.resolutionCorrection;
+    assert.equal(correction.attempts, 1);
+    assert.equal(correction.additionalAttempts, 0);
   });
-  attachAvailability(fixture, {
-    async onSchedule(next) {
-      if (next.pipelineState.resolutionCorrection?.stage === "correcting")
-        throw process.stop();
-    },
+}
+
+for (const scenario of [
+  "stale",
+  "current",
+  "lost reconstruction acknowledgement",
+  "lost retirement acknowledgement",
+  "repeated",
+  "repeated live",
+  "stale at stop",
+  "mismatched at stop",
+  "current at stop",
+  "repeated at stop",
+]) {
+  const stopping = scenario.endsWith(" at stop");
+  const expiry = scenario.replace(/ at stop$/u, "");
+  const loseReconstruction = expiry === "lost reconstruction acknowledgement";
+  const loseRetirement = expiry === "lost retirement acknowledgement";
+  const description = loseReconstruction
+    ? "catalog restatement resumes a journaled reconstruction after acknowledgement loss"
+    : loseRetirement
+      ? "catalog restatement reconstructs from the journal after retirement acknowledgement loss"
+      : `catalog restatement recovery handles ${scenario} watchdog expiry`;
+  test(description, async (t) => {
+    const miss = new Error("Catalog miss before read-only invocation.");
+    const code = "ERR_MODEL_CATALOG_RETRY";
+    let binding = null;
+    let restated = 0;
+    let process;
+    let inactivity;
+    const repeated = expiry.startsWith("repeated");
+    const live = expiry === "repeated live";
+    const reconstructionLoss = new Error(
+      "Reconstruction acknowledgement lost.",
+    );
+    let reconstructions = 0;
+    const fixture = await createFixture(t, {
+      ...terminalFindingFlow("independent", [
+        invalidResolution(),
+        resolution("FIX", "R1"),
+      ]),
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (!isResolution(request)) return;
+        if (request.access === "workspace-write") {
+          await writeRepair(request, projectPath);
+          return;
+        }
+        if (++restated === 1) {
+          await assert.rejects(inactivity.expire(request), {
+            code: "ERR_PROVIDER_INACTIVE",
+          });
+          throw miss;
+        }
+        if (restated === 2) {
+          if (expiry === "stale") throw process.stop();
+          if (repeated) assert.equal(await request.onFreshSession(), true);
+          return inactivity.expire(request);
+        }
+        if (live || loseReconstruction || loseRetirement)
+          assert.equal(await request.onFreshSession(), false);
+      },
+    });
+    fixture.runtime.catalogRetry = {
+      code,
+      eligible: (cause) => cause === miss,
+      details: (role, checkpoint) => ({ code, role, checkpoint }),
+      hasPossibleEffect: () => false,
+      hasWritableNoEffect: () => false,
+      resuming: (role, checkpoint) =>
+        binding?.role === role && binding.checkpoint === checkpoint,
+      claimResume(role, checkpoint) {
+        if (binding === null) return false;
+        assert.equal(this.resuming(role, checkpoint), true);
+        binding = null;
+        return true;
+      },
+    };
+    inactivity = await attachInactivity(fixture, {
+      onRecord(run) {
+        if (run.inactivityRecovery.status === "reconstructing") {
+          reconstructions += 1;
+          if (loseReconstruction && reconstructions === 1)
+            throw reconstructionLoss;
+        }
+        if (
+          !live &&
+          !loseRetirement &&
+          restated === 2 &&
+          run.inactivityRecovery.status === "expired"
+        )
+          process.stop();
+      },
+    });
+    process = interruptible(fixture);
+
+    const paused = await fixture.run();
+    assert.equal(paused.pause.code, code);
+    assert.equal(paused.inactivityRecovery.status, "expired");
+    binding = paused.pause;
+    const { transition, startAgentTurn } = fixture.runtime;
+    fixture.runtime.transition = (patch, options) => {
+      const current = fixture.currentRun;
+      return transition(
+        {
+          ...patch,
+          modelCatalogResume: nextCatalogResume(current, {
+            ...current,
+            ...patch,
+          }),
+        },
+        options,
+      );
+    };
+    fixture.runtime.startAgentTurn = async (turn, options) => {
+      const retry = fixture.currentRun.modelCatalogResume;
+      if (retry != null) {
+        assert.equal(turn.role, retry.role);
+        assert.equal(options.catalogCheckpoint, retry.checkpoint);
+        await transition({ modelCatalogResume: null });
+      }
+      return startAgentTurn(turn, options);
+    };
+    inactivity.restart();
+    if (live) {
+      const suspended = await fixture.run();
+      assert.equal(suspended.pause.reason, "backend_unavailable");
+      assert.equal(suspended.pause.code, "ERR_PROVIDER_INACTIVE");
+      assert.equal(suspended.activeTurn, null);
+      assert.equal(suspended.pipelineState.resolutionCorrection.attempts, 1);
+      assert.equal(
+        suspended.pipelineState.resolutionCorrection.stage,
+        "correcting",
+      );
+      assert.equal(suspended.inactivityRecovery.attempt, 2);
+      assert.equal(suspended.inactivityRecovery.status, "expired");
+
+      const loss = new Error("Inactivity resume acknowledgement lost.");
+      const transition = fixture.runtime.transition;
+      fixture.runtime.transition = async (patch, options) => {
+        const next = await transition(patch, options);
+        if (patch.pause === null) throw loss;
+        return next;
+      };
+      inactivity.restart();
+      await assert.rejects(fixture.run(), (cause) => cause === loss);
+      fixture.runtime.transition = transition;
+      assert.equal(fixture.currentRun.pause, null);
+      assert.equal(fixture.currentRun.activeTurn, null);
+      assert.equal(restated, 2);
+
+      inactivity.restart();
+      const completed = await fixture.run();
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.equal(completed.counters.fixRounds, 1);
+      assert.equal(completed.inactivityRecovery, null);
+      assert.deepEqual(
+        resolutionCalls(fixture).map(({ access }) => access),
+        ["workspace-write", "read-only", "read-only", "read-only"],
+      );
+      assert.ok(
+        fixture.transitions.every(
+          ({ patch }) =>
+            (patch.pipelineState?.resolutionCorrection?.attempts ?? 0) <= 1,
+        ),
+      );
+      return;
+    }
+    if (loseRetirement) {
+      // The live first expiry retires its turn durably, then loses the reply.
+      const retirementLoss = new Error("Retirement acknowledgement lost.");
+      const finish = fixture.runtime.finishAgentTurn;
+      fixture.runtime.finishAgentTurn = async (...args) => {
+        const next = await finish(...args);
+        if (restated === 2) throw retirementLoss;
+        return next;
+      };
+      await assert.rejects(fixture.run(), (cause) => cause === retirementLoss);
+      fixture.runtime.finishAgentTurn = finish;
+    } else {
+      await assert.rejects(fixture.run(), (cause) => cause === process.loss);
+    }
+    process.restore();
+    const interrupted = fixture.currentRun;
+    assert.equal(
+      interrupted.activeTurn?.phase ?? null,
+      loseRetirement ? null : "resolve-findings",
+    );
+    assert.equal(interrupted.pause, null);
+    assert.equal(interrupted.pipelineState.workflowState, "RESOLVE_FINDINGS");
+    assert.equal(
+      interrupted.pipelineState.resolutionCorrection.stage,
+      "correcting",
+    );
+    assert.equal(interrupted.pipelineState.resolutionCorrection.attempts, 1);
+    assert.equal(interrupted.inactivityRecovery.attempt, repeated ? 2 : 1);
+    assert.equal(
+      interrupted.inactivityRecovery.expiryRevision !==
+        paused.inactivityRecovery.expiryRevision,
+      expiry !== "stale",
+    );
+
+    if (expiry === "mismatched")
+      await fixture.runtime.transition({
+        inactivityRecovery: {
+          ...interrupted.inactivityRecovery,
+          checkpoint: "resolve-findings:workspace-write:work",
+        },
+      });
+    inactivity.restart();
+    if (stopping) {
+      const requested = await fixture.runtime.transition({
+        stopRequest: { acceptedRevision: interrupted.revision + 1 },
+      });
+      const stopped = await runPolishing({
+        run: requested,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      assert.equal(stopped.activeTurn, null);
+      assert.equal(stopped.pipelineState.resolutionCorrection.attempts, 1);
+      assert.deepEqual(stopped.counters, interrupted.counters);
+      assert.equal(restated, 2);
+      if (["stale", "mismatched"].includes(expiry)) {
+        assert.equal(stopped.pause.reason, "resolution_output_invalid");
+        assert.deepEqual(stopped.pause.evidence, [LOST_EVIDENCE]);
+      } else {
+        assert.equal(stopped.pause, null);
+        assert.equal(
+          stopped.pipelineState.resolutionCorrection.stage,
+          repeated ? "retry-ready" : "correcting",
+        );
+        inactivity.restart();
+        const resumed = await fixture.run();
+        assert.equal(resumed.pipelineState.workflowState, "DONE");
+        assert.equal(resumed.inactivityRecovery, null);
+        assert.equal(restated, 3);
+        assert.equal(reconstructions, 1);
+      }
+      return;
+    }
+    if (loseReconstruction) {
+      await assert.rejects(
+        fixture.run(),
+        (cause) => cause.cause === reconstructionLoss,
+      );
+      const reconstructed = fixture.currentRun;
+      assert.equal(reconstructed.pause, null);
+      assert.equal(reconstructed.activeTurn, null);
+      assert.equal(reconstructed.inactivityRecovery.attempt, 2);
+      assert.equal(reconstructed.inactivityRecovery.status, "reconstructing");
+      assert.equal(
+        reconstructed.inactivityRecovery.expiryRevision,
+        interrupted.inactivityRecovery.expiryRevision,
+      );
+      assert.equal(
+        reconstructed.pipelineState.resolutionCorrection.attempts,
+        1,
+      );
+      assert.equal(restated, 2);
+      inactivity.restart();
+    }
+    const recovered = await fixture.run();
+    assert.equal(recovered.counters.fixRounds, 1);
+    const continued =
+      expiry === "current" || loseReconstruction || loseRetirement;
+    assert.equal(restated, continued ? 3 : 2);
+    assert.equal(recovered.activeTurn, null);
+    if (continued) {
+      assert.equal(recovered.pipelineState.workflowState, "DONE");
+      assert.equal(recovered.inactivityRecovery, null);
+      assert.equal(reconstructions, 1);
+      assert.deepEqual(
+        resolutionCalls(fixture).map(({ access }) => access),
+        ["workspace-write", "read-only", "read-only", "read-only"],
+      );
+      assert.ok(
+        fixture.transitions.every(
+          ({ patch }) =>
+            (patch.pipelineState?.resolutionCorrection?.attempts ?? 0) <= 1,
+        ),
+      );
+    } else if (repeated) {
+      assert.equal(recovered.pause.reason, "backend_unavailable");
+      assert.equal(recovered.pause.code, "ERR_PROVIDER_INACTIVE");
+      assert.deepEqual(
+        recovered.inactivityRecovery,
+        interrupted.inactivityRecovery,
+      );
+    } else {
+      assert.equal(recovered.pause.reason, "resolution_output_invalid");
+      assert.deepEqual(recovered.pause.evidence, [LOST_EVIDENCE]);
+      assert.deepEqual(recovered.inactivityRecovery, paused.inactivityRecovery);
+    }
   });
-  process = interruptible(fixture);
-
-  const lost = await fixture.run();
-  assert.equal(lost.pipelineState.resolutionCorrection.stage, "ready");
-  assert.equal(
-    lost.availabilityRetry.checkpoint,
-    "resolve-findings:workspace-write:work",
-  );
-  await assert.rejects(fixture.run());
-  process.restore();
-  const interrupted = fixture.currentRun;
-  assert.equal(interrupted.activeTurn, null);
-  const consumed = interrupted.pipelineState.resolutionCorrection;
-  assert.equal(consumed.stage, "correcting");
-  assert.equal(consumed.attempts, 1);
-  assert.equal(
-    interrupted.availabilityRetry.checkpoint,
-    "resolve-findings:workspace-write:work",
-  );
-
-  const completed = await fixture.run();
-  assert.equal(
-    completed.pipelineState.workflowState,
-    "DONE",
-    JSON.stringify(completed.pause),
-  );
-  assert.equal(completed.counters.fixRounds, 1);
-  assert.equal(completed.availabilityRetry, null);
-  assert.deepEqual(
-    resolutionCalls(fixture).map(({ access }) => access),
-    ["workspace-write", "workspace-write", "read-only", "read-only"],
-  );
-});
+}
 
 test("a classified retry settles an earlier partial write as changed content", async (t) => {
   let unavailable = true;

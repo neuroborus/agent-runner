@@ -46,11 +46,102 @@ import {
   RUNNER_CONFIGURATION,
   SOURCE_SESSION,
 } from "./support/index.js";
+import {
+  modelCatalogMiss,
+  withModelCompletion,
+} from "./support/model-catalog.js";
 import { outputExhaustion } from "./support/output-exhaustion.js";
 import {
   APPLICABILITY_BATCH_SCHEMA,
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+test("catalog retries require a completed role and reject a new source fork", async (t) => {
+  for (const kind of [
+    "first-use",
+    "child-only",
+    "source-fork",
+    "review",
+    "implement",
+  ]) {
+    const sourceFork = kind === "source-fork";
+    const pipelineId = kind === "implement" ? "plan-execution" : "polishing";
+    const fixture = await operatorFixture(t, pipelineId);
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    let rejected;
+    let retry;
+    adapter.run = async (request) => {
+      const target =
+        kind === "implement"
+          ? request.access === "workspace-write"
+          : ["review", "source-fork"].includes(kind)
+            ? request.prompt.includes("semantic candidate")
+            : true;
+      if (target && rejected === undefined) {
+        rejected = request;
+        if (kind === "child-only")
+          await request.onSessionCreated("child-before-completion");
+        throw modelCatalogMiss(request);
+      }
+      if (target) retry ??= request;
+      return withModelCompletion(await runRole(request), request);
+    };
+    const adapters = { codex: adapter };
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const runner = runnerFor(fixture, adapters, { runStore: store });
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: {
+        worker: { model: "worker-model" },
+        reviewer: { model: "reviewer-model" },
+      },
+      ...(sourceFork
+        ? { sourceSession: { backend: "codex", id: SOURCE_SESSION } }
+        : {}),
+    });
+    const retryable = ["review", "implement"].includes(kind);
+    if (retryable) {
+      await runner.resume({ runId: created.runId });
+    } else {
+      await assert.rejects(runner.resume({ runId: created.runId }), {
+        code: "ERR_CODEX_MODEL_UNAVAILABLE",
+      });
+    }
+    const paused = await store.loadRun(created.runId);
+    if (sourceFork) {
+      assert.equal(rejected.session.mode, "fork");
+      assert.ok(paused.modelCompletionReceipts.reviewer);
+    }
+    if (retryable) {
+      assert.equal(paused.pause.reason, "backend_unavailable");
+      assert.equal(
+        paused.pause.role,
+        kind === "implement" ? "worker" : "reviewer",
+      );
+      assert.equal(paused.activeTurn, null);
+      assert.equal(paused.availabilityRetry, null);
+      if (kind === "implement")
+        assert.equal(paused.pipelineState.writableResult.stage, "prepared");
+      const cold = runnerFor(fixture, adapters);
+      const done = (await cold.resume({ runId: paused.runId })).run;
+      assert.equal(done.pipelineState.workflowState, "DONE");
+      assert.equal(retry.access, rejected.access);
+      assert.equal(retry.model, rejected.model);
+      assert.notEqual(retry.session?.mode, "fork");
+      assert.equal(done.counters.fixRounds, 0);
+    } else {
+      assert.equal(paused.pipelineState.workflowState, "FAILED");
+      assert.equal(paused.pause.diagnosticClass, "model_unavailable");
+      if (!sourceFork) assert.deepEqual(paused.modelCompletionReceipts, {});
+      if (kind === "child-only")
+        assert.equal(paused.sessionLineage.children.length, 1);
+      assert.equal(retry, undefined);
+    }
+  }
+});
 
 for (const [pipelineId, kind] of [
   ["plan-authoring", "questions"],

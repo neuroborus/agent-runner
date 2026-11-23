@@ -151,6 +151,41 @@ MCP control-plane suite composes the real launcher, IPC admission, CLI diagnosti
 publication, restart with unknown exit facts, ownership exclusion and identical-key
 receipt recovery. It retains the existing STDIO protocol-cleanliness coverage.
 
+## Explicit-model catalog recovery
+
+Fast regressions cover journal recovery between resume acceptance and turn
+start. Admission and replay reject a turn that bypasses resume acceptance or
+supplies a mismatched checkpoint, phase or reservation, including a replaced
+candidate-review step or correction scope, changed candidate-review fix
+accounting, COMMIT step or authorization, authoring draft or revision budget,
+audit pass or budget, or init revision budget.
+The journal rejects a COMMIT catalog pause backed only by a model receipt or
+an unproven authorization and preserves verified retirement through
+operator-stop settlement. It also rejects an initial IMPLEMENT pause without
+verified retirement of its active invocation or with a changed baseline.
+Admission and replay also reject changes to frozen input hashes, the
+candidate, or spent fix rounds on initial `CHECK_AND_FIX` pause publication.
+The journal rejects replacement of the saved candidate-review infrastructure
+scope. Admission and replay also reject replacing the saved candidate,
+correction or spent fix budget during a `CHECK_AND_FIX` catalog retry in either
+coding pipeline or a polishing `POLISH` catalog retry.
+State persistence covers rejecting receipts without a completed attempt for the
+current invocation at admission and replay. Execution clarification tests
+cover recovery of a pending append from versions 43 and 45 and rejection of
+invalid original proof or a changed append intent. Journal tests reject a
+redirected resume or a changed arbitration checkpoint and preserve a paused
+COMMIT reservation through migration.
+State tests cover a deferred stop recorded before a plan-execution restatement
+starts, for both catalog retry admission and atomic availability scheduling.
+In both coding pipelines, atomic backoff admission and replay reject a failed
+provider attempt at a different checkpoint, and accept a matching failed
+attempt at a retained checkpoint. Watchdog regressions reject a mismatched
+provider checkpoint in state admission and replay, cold plan-execution
+recovery, and polishing stop settlement. State replay also rejects a writable
+reservation substituted before the labeled read-only turn starts.
+[Runner coverage](runner.md#explicit-model-catalog-recovery) owns the composed
+pipeline and slow-suite regressions.
+
 ## Preparation custody
 
 Preparation custody regressions extend `test/state/journal-checkpoints.test.js`'s

@@ -92,6 +92,46 @@ semantics, and handoff behavior. Cover at least:
 - every supported legacy version migrating through state version 18 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
+- explicit model catalog recovery preserves the selected role and checkpoint
+  after a qualifying miss, including read-only candidate review and candidate
+  clean confirmation. `POLISH` and `CHECK_AND_FIX` retries preserve the frozen
+  input hashes, candidate, pending correction and fix-round accounting from the
+  first pause through the matching turn start.
+  A lazy Worker catalog miss during writable `RESOLVE_FINDINGS` keeps the
+  original blockers, authorized fix budget and spent counters through retry.
+  Initial publication of a writable retry, or of a read-only candidate review,
+  clean confirmation or terminal confirmation retry, retires the exact
+  invocation of that phase, keeps the frozen inputs, reservation, any captured
+  infrastructure fingerprint and review history, and matches
+  the no-effect catalog rejection recorded on that invocation's failed provider
+  attempt. Reconciled read-only restatement retains
+  its separate checkpoint.
+  Candidate-review retries preserve frozen input hashes, spent counters, and
+  the configured and additional fix rounds from resume acceptance through turn
+  start. The catalog pause records the inspected validation infrastructure
+  fingerprint even on initial turns. The retry checks it before dispatch and
+  through result settlement, including after interruption, and preserves any
+  pending correction on drift.
+  Successful combined-mode clean confirmation retires the Worker retry scope
+  before independent candidate review inspects its own scope. The
+  `backend_unavailable` pause retains any reconciled finding report checkpoint.
+  Workspace drift during any proven no-effect lookup pauses with the saved
+  baseline and findings intact on cold resume and during operator stop
+  settlement, including a first-use miss without a completion receipt.
+  A miss during native recovery, a proven no-effect miss on a reconstructed
+  original, or one that settles after a first watchdog expiry journaled during
+  the same invocation is recorded on the reconciled finding report. A restarted Runner
+  can enter its read-only restatement under the original recovery episode and
+  its spent allowance even if acknowledgement of reconciliation was lost.
+  A qualifying pre-invocation miss on its read-only restatement retires the turn
+  only with the read-only no-effect rejection recorded on its exact failed
+  attempt. Publication, explicit resume and dispatch preserve the frozen inputs,
+  reconciled candidate, consumed reservation, counters and any retained provider
+  episode. An earlier backoff or watchdog expiry cannot authorize another
+  invocation after the retried turn loses its result.
+  An operator pause accepted after the rejection was journaled preserves the
+  consumed restatement after verifying its repository, inputs, guidance and
+  validation scope. Dispatch still requires explicit resume.
 - finding-resolution report restatement in both independent-review modes:
   invalid and lost reports, interrupted publication, operator stops, blocked
   and product-decision outcomes, drift, exhaustion, explicit retry, and

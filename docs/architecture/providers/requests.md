@@ -52,6 +52,22 @@ semantics. A specific Claude effort rejection takes precedence over a generic
 turn-setup failure. Native rejection text is not retained, and commit-readiness
 failure cannot start or replay the constrained executor.
 
+## Explicit-Model Attestation
+
+A settled adapter response attests its catalog-validated model. Any model
+reported by thread start, resume or fork must match the selected catalog ID or
+alias before the turn starts. Codex retains model reroute evidence through App
+Server shutdown, even without an observation callback. Explicit-model messages
+require unique JSON fields and reroute notifications cannot carry a request ID.
+A reroute, malformed reroute envelope, interrupted stdout drain, or unsuccessful
+provider exit rejects the result before attestation or commit execution.
+Codex checks for a reroute before context compaction and again before dispatching
+the recovery turn. Explicit-model fresh-thread recovery requires a successfully
+settled transport with no reroute. Settlement preserves an existing operator
+stop or provider failure assigned to Runner recovery. Runner journals the
+attested selection as a private
+[completion receipt](../recovery/journal.md#explicit-model-catalog-recovery).
+
 ## Required-Check Diagnostic Attribution
 
 The shared request contract accepts an optional diagnostic-only

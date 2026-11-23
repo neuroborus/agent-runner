@@ -8,7 +8,11 @@ import {
   MAX_FINDING_RECHECK_PASSES,
   validDiscoveryBudget,
 } from "./discovery-contract.js";
-import { migrateOutputRecovery } from "./output-recovery.js";
+import {
+  assertAuditCatalogTransition,
+  matchesAuditCatalogReservation,
+  migrateOutputRecovery,
+} from "./output-recovery.js";
 import { assertAuditRun } from "./verification-contract.js";
 import { reportPaths, REPORT_FILENAME } from "./publication-contract.js";
 import { runAudit } from "./publication.js";
@@ -162,6 +166,8 @@ export const auditPipeline = Object.freeze({
     "Audit a Git or ordinary workspace read-only and publish a reviewed audit.md.",
   projections: auditProjections,
   validateResumeAction,
+  assertCatalogTransition: assertAuditCatalogTransition,
+  matchesCatalogReservation: matchesAuditCatalogReservation,
   workflow: Object.freeze({
     nonResumableStates: Object.freeze(["FAILED"]),
     createState: createAuditState,

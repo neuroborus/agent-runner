@@ -162,6 +162,28 @@ the isolated executor as a proven pre-effect rejection.
 Executor outcomes remain on their verification-only path and are never
 replayed.
 
+## Explicit-Model Catalog Misses
+
+Codex emits the redacted `model_unavailable` class only after a well-formed
+catalog lookup for an explicit model reaches its final page without a match
+and the App Server transport settles successfully. Settlement requires a
+drained stdout and a successful provider exit, using the supervised outcome
+when available and the child close status for a direct launch.
+Invalid UTF-8, duplicate JSON fields, repeated or unmatched catalog responses,
+and invalid protocol output, an interrupted stdout drain or an unsuccessful
+provider exit while settling a provisional miss produce `model_catalog_invalid`.
+A reroute during settlement also invalidates a miss because the attempt has no
+selected thread or turn.
+Repeated cursors, a cursor still pending at the cap, and an App Server exit
+while a cursor is pending produce the same diagnosis. Unsupported effort produces
+`effort_unsupported`. Both are terminal and grant no catalog retry. An initial
+miss before thread selection proves `turn`/`none`. A miss in native recovery
+carries `possible`. The local-commit executor retains its separate
+`commit`/`not_started` proof. COMMIT verifies that consumed authorization even
+for terminal model selection failures, then withholds fresh authorization.
+The Runner [catalog recovery contract](../recovery/journal.md#explicit-model-catalog-recovery)
+decides whether a classified miss may pause for explicit retry.
+
 ## Backend-Unavailable Pauses
 
 An otherwise unclassified valid read-only result or process failure is

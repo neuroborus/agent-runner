@@ -213,6 +213,13 @@ resumption, budget renewal, acceptance, source changes or isolation bypass.
 The baseline uses the common `repositoryBaseline` binding so successful recovery
 can retire its evidence against the same unchanged workspace.
 
+A qualifying explicit-model catalog miss pauses as `backend_unavailable`.
+The running discovery or recheck reservation is retained for an explicit resume
+at the same checkpoint, with the same budgets and source bindings. Owner loss
+after accepting the resume and before recording the turn start retains that
+reservation. Admission and journal replay reject a replacement or already
+settled pass, including a recheck for a different findings batch.
+
 `DISCOVER` reserves a numbered `running` pass durably before invocation.
 Reservations, interrupted launches, invalid outputs and incomplete passes all
 consume the same finite run-wide budget. An interrupted reservation becomes

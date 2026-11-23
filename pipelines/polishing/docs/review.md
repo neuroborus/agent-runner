@@ -180,8 +180,10 @@ a `ready` checkpoint bound to that snapshot's content and Git controls and the
 established validation-infrastructure fingerprint; and, for changed content, the
 single fix charge, `pendingCorrection`, and invalidation of every dependent
 approval. The workflow stays at `RESOLVE_FINDINGS` with its blockers; the
-candidate move waits for settlement. A pure classifier retains only the strict
-normalizer's bounded diagnostic. Availability backoff, inactivity
+candidate move waits for settlement. If acknowledgement of publication or turn
+retirement is lost, Runner recovers from the authoritative journal. A pure
+classifier retains only the strict normalizer's bounded diagnostic. Availability
+backoff, inactivity
 reconstruction, authentication, and output exhaustion keep their existing
 reconciliation, charging, and retry contracts for ordinary resolution and retire
 that checkpoint with their first transition. Only an inactivity expiry proven
@@ -232,17 +234,35 @@ changes allowed only for its writable access, charged once, and published as
 returned response retires them, the restatement uses the original's unfinished
 availability or inactivity checkpoint, so owner loss never renews either
 allowance; a backoff pending there or at the restatement checkpoint before
-invocation resumes the consumed restatement, and a consumed reconstruction
-pauses `backend_unavailable`, whose explicit resume runs that consumed
-restatement. A diagnostic-free `ready` checkpoint, a valid report whose
-settlement was lost, receives the same diagnostic and is restated. A
+invocation resumes the consumed restatement. On catalog resume a fresh-session
+request can use the remaining reconstruction under the same read-only
+reservation after the adapter retires its native work. A transient availability
+failure during restatement publishes the next backoff and retires that turn in
+one journal event. Admission and replay bind retirement to the active read-only
+restatement's recorded start, consumed reservation, reconciled content, and a
+failed provider attempt recorded after that start at the backoff's checkpoint.
+Runner retires the earlier invocation before recording a start that can prove
+read-only restatement. If publication is interrupted, recovery uses the journal
+to determine whether the next backoff was scheduled. A catalog miss during a
+continued repair with a spent restatement allowance pauses with
+`resolution_output_invalid` after reconciliation. Explicit resume authorizes one
+more read-only attempt with the saved blockers and counters. A watchdog expiry
+with the reconstruction allowance spent publishes `backend_unavailable`
+together with turn retirement, during live settlement or cold recovery.
+Explicit resume runs that consumed restatement. A diagnostic-free `ready`
+checkpoint, a valid report whose settlement was lost, receives the same
+diagnostic and is restated. A
 restatement whose turn is still recorded was invoked: unless that attempt's own
 first expiry was proven, it is lost and publishes `exhausted` before its turn
 retires, so retained availability evidence never reauthorizes it. Without a
 pending retry, an uncategorized `correcting` attempt is also lost. Operator
 stops reconcile without invoking an agent: a stopped original becomes `ready`
-at `RESOLVE_FINDINGS`, a stopped invoked restatement is lost in the same way,
-and other stages only verify the binding.
+at `RESOLVE_FINDINGS`, and other stages verify the binding. An interrupted
+restatement remains eligible for continuation on explicit resume when its
+matching watchdog expiry predates stop acceptance. Cold and stop recovery both
+verify the checkpoint of the provider attempt recorded after restatement start,
+including a retained original episode when that was the dispatched checkpoint.
+Without that proof the interrupted restatement is lost.
 
 A restated `BLOCKED` keeps the consumed `blocked` checkpoint and pauses
 `environment_blocked` with `RESOLVE_FINDINGS`; this is the supported stop when
@@ -261,9 +281,15 @@ An invalid or lost restatement publishes `exhausted` with the
 explanation, `Worker field <field> violated <constraint>.` evidence, and
 `RESOLVE_FINDINGS`. Availability backoff, the shared inactivity allowance,
 authentication, and output exhaustion retry the same consumed attempt without
-recharging it. An explicit null resume of either checkpoint-bound pause persists
-one more consumed attempt before exactly one further read-only restatement;
-neither retry runs writable resolution or renews the automatic allowance.
+recharging it. Clearing an authentication, output-exhaustion or inactivity
+pause records `retry-ready` for the bound restatement. The next read-only turn
+changes it to `correcting` as part of turn start, so restart before dispatch
+preserves the continuation. Output exhaustion retains the restatement's
+existing provider episode. Authentication retires superseded availability
+backoff. An explicit null resume of `resolution_output_invalid` or a blocked
+restatement's `environment_blocked` pause persists one more consumed attempt
+before exactly one further read-only restatement. Both retries preserve the
+automatic allowance and run read-only.
 
 ##### Unfinished repair continuation
 
@@ -388,7 +414,16 @@ which may differ from the established fingerprint after an authorized
 infrastructure edit. An accepted terminal validation change replaces the
 established tuple without invalidating or renewing a consumed candidate
 correction. Correction-scope drift invalidates the retained
-finalization record and routes through `FINALIZE`.
+finalization record and routes through `FINALIZE`. A writable `FINALIZE`
+catalog retry preserves the frozen input hashes, candidate, validation
+inventory, correction scope, spent rounds and authorized limit from the first
+pause through dispatch. A catalog retry at `CONFIRM` preserves frozen inputs,
+finalization evidence, and the correction allowance through turn start. Scope
+drift before dispatch clears terminal evidence and pauses with
+`unsafe_git_state`. If an accepted catalog retry still owns the candidate
+review, infrastructure drift pauses as `unsafe_git_state` before dispatch and
+preserves the pending correction and its consumed allowance. Admission and
+journal replay preserve that review scope until the matching turn starts.
 Candidate Reviewer rejections carry the same candidate-review field and
 constraint identities as lazy clean confirmation. Terminal confirmation shares
 their finding count, identity, content, uniqueness and product-decision field

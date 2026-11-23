@@ -19,6 +19,9 @@ appending anything.
 The runner supplies this private history to a pipeline's optional
 asynchronous `prepareRecovery` descriptor operation. Proofs consume events
 incrementally and require the final replayed state to match the inspected run.
+When operator-stop recovery needs journal history, Runner prepares it against
+the certified stop snapshot, which can include a cancellation accepted during
+reconciliation activity publication.
 Plan execution binds legacy terminal confirmation eligibility to the inspected
 run object and revision; no history or recovery authorization is serialized
 into public run data. Status may project supported migrations in memory, while
@@ -214,7 +217,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 27 (`1:27`); legacy runs require an explicit leased migration publishing
+version 28 (`1:28`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.
@@ -250,3 +253,165 @@ only their generic form. Cursor-based readers expose this projection without
 returning private pipeline state, model output, credentials, or unhashed remote
 and identity values. Persist concise structured decisions and summaries, never
 raw model transcripts or chain-of-thought.
+
+## Explicit-model catalog recovery
+
+Provider [catalog-miss classification](../providers/failures.md#explicit-model-catalog-misses)
+and [model attestation](../providers/requests.md#explicit-model-attestation)
+supply this contract's inputs. Common envelope version 28 journals at most one
+private completion receipt per frozen role, bound to the role, provider,
+profile, explicit model and effort; its
+[migration](../migrations/common-envelope.md#catalog-recovery-evidence) starts
+with empty receipts. The run store requires a runner-recorded completed attempt
+that started after the current turn opened, with provider custody retired.
+Child creation, compaction and provider observations alone confer no model
+proof. Replay verifies the same attempt binding and append-only receipt
+history. If receipt publication loses its acknowledgement, Runner verifies the
+receipt against the certified journal. An unconfirmed receipt leaves the active
+turn for normal checkpoint reconciliation, including read-only restatement of
+completed workspace writes.
+
+After policy, configuration and stop checks, the Runner reads the latest durable
+receipt and checks the normalized no-effect record. A source-fork request
+cannot use the receipt. The owning workflow verifies its snapshots and pauses
+at the bound checkpoint for explicit resume with the same selection. The
+journal carries that binding from resume acceptance to the matching turn-start
+transition, including a retryable environment pause or a temporary init
+inspection failure at the same workflow state.
+If clearing a retry pause loses its acknowledgement, the coding workflows leave
+the journaled checkpoint for recovery.
+The resume transition must publish the binding before any new turn starts.
+Admission and replay reject redirects to a different workflow phase, including
+when the run returns to a catalog pause before dispatch. They also reject
+replacements of the frozen input hashes while the retry is pending.
+The turn-start event records the logical checkpoint so replay can verify the
+exact binding and the actual turn's role and phase. The registry supplies
+descriptor-owned reservation checks for plan authoring, plan execution,
+polishing, audit and init to the run store for both admission and journal replay.
+First publication requires the owning descriptor to recognize the role, access
+and exact checkpoint, including ordinary direct turns. The public `src/index.js`
+guidance factory defaults to the registry-composed run store and accepts an
+injected store; CLI, MCP, and Runner setup supply their composed store, so
+reclaiming a prior run's lease verifies its journal with the owning pipeline's
+reservation and stop rules. Pipeline checkpoint validation stays at the
+composition boundary.
+
+Plan authoring preserves the saved draft and counters through dispatch.
+Init preserves the frozen settings, spent revisions and proposal evidence
+while rebuilding its read-only turn reservation from the saved facts.
+Coding restatements preserve their stage and attempt. A `CHECK_AND_FIX` or
+polishing `POLISH` catalog retry keeps the frozen input hashes, candidate,
+pending correction and fix budget from the first pause through dispatch. A
+writable `FINALIZE` retry keeps the frozen input hashes, candidate, validation
+inventory, correction scope, spent counters and authorized limit from the first
+pause through acceptance and dispatch. Both coding pipelines journal the live
+validation-infrastructure fingerprint with catalog pauses at candidate review
+and candidate clean confirmation, including initial turns with no pending
+correction. A first read-only candidate review, clean confirmation or terminal
+confirmation catalog pause must retire that gate phase's current invocation and
+its sole failed attempt at that checkpoint with its recorded no-effect
+rejection. It keeps the frozen input hashes, reservation and counters and may
+only add an absent infrastructure fingerprint. Every other first read-only
+catalog pause, including audit, init, plan authoring and validation migration
+in both coding pipelines, likewise needs that sole failed attempt at the
+pipeline's observed checkpoint; without it the Runner grants no retry. Plan
+execution narrative reviews observe `plan-context` and bind retries to their
+producing turns. Polishing migration checkpoints keep the suspended phase
+prefix and use the migration reservation. A captured fingerprint, accepted
+work reports and prior finding decisions stay unchanged through later misses.
+The reservation also preserves finalization guidance, any
+correction scope and, in plan execution, the selected step. A candidate-review
+retry preserves its complete saved state, including custom criterion results,
+spent counters and configured and additional fix rounds, through the matching
+Reviewer turn start. Audit preserves its saved state,
+including both pass budgets, through the matching catalog retry turn start.
+In combined mode, successful Worker clean confirmation retires its retry
+scope when advancing to the independent Reviewer, which inspects its own scope.
+Both coding pipelines preserve the saved finalization evidence and correction
+allowance until a bound `CONFIRM` turn starts. Before dispatch, confirmation
+scope drift clears the stale terminal evidence and retires the binding through an
+`unsafe_git_state` pause. Admission and replay still reject a direct redirect
+to `FINALIZE`.
+
+Plan execution state version 46 persists the validation-migration disagreement
+and resumes its Arbiter from that record and the existing correction ledger.
+The first migration pause preserves the suspended role and workflow state,
+frozen inputs, reservation, disagreement, correction ledger and spent counters.
+Admission and journal replay enforce that preservation for both direct and
+narrative pauses and their subsequent retries.
+Older checkpoints migrate without inventing a disagreement or offering a retry
+for an unbound Arbiter catalog pause.
+The version-43 through version-45 migrations verify any pending clarification
+append against its checkpoint before changing the bound pipeline state.
+Replay verifies the same rebinding and preserves the exact append intent and
+both transcript hashes.
+Polishing resumes validation migration in the saved phase and role, preserving
+its recorded disagreement and correction ledger through the retry.
+Candidate review and candidate clean confirmation compare the saved scope
+before dispatch and through result settlement, including after recovery of an
+interrupted retry.
+Infrastructure drift pauses the run with any pending correction intact and
+without accepting a response. An older initial candidate pause without an
+inspected scope cannot establish that retry binding.
+
+COMMIT consumes the authorization it prepared for the selected step, and
+audit retains its unsettled pass. Initial IMPLEMENT journals the verified
+no-effect and unchanged-workspace result when it retires the matching active
+invocation into the paused reservation. Publishing a `workspace-write` catalog
+retry requires the retirement event to repeat the redacted no-effect rejection
+recorded on the sole Runner-recorded attempt after the turn started. Admission
+and replay require a failed status, the same role, the exact checkpoint and
+matching rejection evidence. A catalog pause that sends a reconciled original
+invocation to read-only restatement needs the original invocation's matching
+failed attempt and rejection. A catalog pause for an already-consumed
+restatement can retire only the active turn whose own failed attempt records a
+read-only no-effect rejection. The attempt uses the restatement's checkpoint or
+its retained provider episode's checkpoint. Publication, acceptance, and
+dispatch preserve the frozen inputs, reconciled candidate, reservation and
+spent counters.
+If a stop is accepted after that rejection is journaled, operator-pause
+settlement verifies the same attempt against the saved inputs, candidate and
+validation scope. The operator pause keeps the retry for explicit resume and
+does not dispatch or charge the restatement again.
+Plan execution captures the reconciled candidate's validation scope at the
+first read-only turn start for each restatement attempt. The saved scope binds
+provider continuations across backoff and Runner restart. Runner rechecks it
+before publishing a continuation, after turn-start publication and before
+accepting the result. The established validation fingerprint still records
+the scope used for later validation-change review. Cancellation accepted
+before stop settlement retires the invocation and retains its rejection and
+accounting without publishing a new restatement retry.
+
+The COMMIT catalog pause
+must retire a consumed authorization with qualifying rejection proof in the
+preceding journal state, including during operator-stop settlement. Admission
+and replay accept that proof only from the latest failed Worker attempt at the
+same `commit:<step>` checkpoint, started after the consumed COMMIT turn opened.
+When that attempt fails, the Runner records its own normalized `commit`/`none`/
+`not_started` catalog rejection on it; the recording event must repeat exactly
+that attempt-bound rejection. A generic failure, a later independent claim or
+an earlier completion receipt proves nothing about that invocation. The stop
+monitor binds any reduced pre-executor rejection to the specific authorization
+and clears it before a new attempt. A coding restatement records its invocation
+boundary from the journal predecessor inside the turn-start transaction. The
+predecessor must show that the earlier invocation has retired. Ordinary
+reconstruction can replace a stale activity marker without establishing
+restatement proof. A deferred stop accepted during preparation can advance that
+predecessor without invalidating the invocation. If plan execution must rebuild a
+narrative review's prerequisite, the catalog binding names that prerequisite's
+phase while provider recovery retains the narrative checkpoint.
+
+Workspace drift during a proven no-effect writable turn blocks reconciliation
+without becoming part of the candidate. Runner binds the proof to the turn
+before checking configuration and stop. After owner loss, ordinary resume and
+stop reconciliation recover the guard from certified history. The active turn
+must have exactly one attempt, which failed at the matching role and writable
+checkpoint.
+This guard preserves the baseline without granting retry authority.
+If configuration drift takes precedence,
+the configuration pause retains the original candidate baseline, reservation
+and accounting without authorizing a catalog retry. Catalog recovery adds no
+backoff episode, reconstruction allowance or source refork. Retained
+[availability episodes](availability.md#catalog-restatement-episodes) and
+[inactivity continuations](inactivity.md#catalog-restatement-continuations)
+keep their existing owners.

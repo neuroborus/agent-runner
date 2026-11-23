@@ -294,7 +294,8 @@ test("guidance prints the complete shared rendering without constructing a pipel
       environment,
       createCommandRunner: () => assert.fail("must not construct a runner"),
       createCommandGuidance(options) {
-        assert.deepEqual(options, { env: environment });
+        assert.equal(options.env, environment);
+        assert.equal(typeof options.runStore.withGuidanceLease, "function");
         return {
           async read(input) {
             assert.deepEqual(input, {

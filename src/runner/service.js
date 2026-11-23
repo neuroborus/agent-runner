@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createOwnershipDiagnostic } from "../platform/index.js";
 import {
+  CATALOG_VALIDATED_MODEL,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminalAdapterDiagnostic,
@@ -22,6 +23,7 @@ import {
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import {
+  createRunStore,
   getPipeline as registeredPipeline,
   resolveStopBoundary,
 } from "../pipeline-registry.js";
@@ -32,8 +34,8 @@ import {
 import { createWorkspaceService } from "../workspace/index.js";
 import { createRuntimeAdmission } from "../runtime/index.js";
 import {
-  createRunStore,
   deepFreeze,
+  matchesObservedInactivityExpiry,
   projectObservations,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
@@ -56,6 +58,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { createDispositionPolicy } from "./dispositions.js";
+import { createModelCatalogRecovery } from "./model-catalog.js";
 import { createAuthenticationPolicy } from "./authentication.js";
 import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
@@ -755,6 +758,16 @@ export function createRunner(options = {}) {
       providers,
       disposition: OUTPUT_EXHAUSTED_DISPOSITION,
     });
+    const modelCompletions = new Set(Object.keys(run.modelCompletionReceipts));
+    const catalogRetry = createModelCatalogRecovery({
+      run,
+      providers,
+      monitor,
+      async verify() {
+        await checkConfiguration();
+        await monitor.check();
+      },
+    });
     const availability =
       monitor === undefined
         ? undefined
@@ -938,8 +951,10 @@ export function createRunner(options = {}) {
           }),
       },
       outputExhaustion,
+      catalogRetry,
       availability,
       inactivity,
+      matchesObservedInactivityExpiry,
       adapters:
         monitor === undefined
           ? selectedAdapters
@@ -973,8 +988,9 @@ export function createRunner(options = {}) {
                         "Directory workflows cannot request Git effects.",
                         { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
                       );
+                    let response;
                     try {
-                      const response = await monitor.invoke(
+                      response = await monitor.invoke(
                         (value) =>
                           inactivity.invoke(
                             role,
@@ -991,8 +1007,6 @@ export function createRunner(options = {}) {
                             runStore.recordExecutionResource(lease, value),
                         },
                       );
-                      providerResponseRole = role;
-                      return response;
                     } catch (cause) {
                       if (
                         authentication.eligible(cause) ||
@@ -1011,6 +1025,12 @@ export function createRunner(options = {}) {
                           throw cause;
                         }
                       }
+                      await catalogRetry.observeFailure(
+                        cause,
+                        role,
+                        request,
+                        current,
+                      );
                       throw cause;
                     } finally {
                       await checkConfiguration();
@@ -1033,6 +1053,39 @@ export function createRunner(options = {}) {
                         });
                       }
                     }
+                    if (
+                      !modelCompletions.has(role) &&
+                      request.model !== undefined &&
+                      response?.[CATALOG_VALIDATED_MODEL] === request.model
+                    ) {
+                      try {
+                        await runStore.recordModelCompletion(
+                          lease,
+                          role,
+                          request,
+                        );
+                      } catch (cause) {
+                        // A lost acknowledgement may follow a complete event.
+                        // Unconfirmed publication leaves this turn for recovery.
+                        const current = await runStore
+                          .loadRun(run.runId)
+                          .catch(() => null);
+                        if (
+                          current === null ||
+                          !Object.hasOwn(current.modelCompletionReceipts, role)
+                        )
+                          throw new RunnerError(
+                            "Model completion receipt could not be confirmed. The active turn remains recoverable.",
+                            {
+                              code: "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
+                              cause,
+                            },
+                          );
+                      }
+                      modelCompletions.add(role);
+                    }
+                    providerResponseRole = role;
+                    return response;
                   },
                 },
               ]),
@@ -1159,13 +1212,14 @@ export function createRunner(options = {}) {
                   await checkConfiguration();
                   return git.prepareCommit(value);
                 },
-                consumeCommit: async (...args) => {
+                consumeCommit: async (authorization, options) => {
+                  monitor.resetCommitRejection();
                   try {
                     await monitor.check();
                     await checkConfiguration();
-                    return await git.consumeCommit(...args);
+                    return await git.consumeCommit(authorization, options);
                   } catch (cause) {
-                    monitor.rejectBeforeCommit(cause);
+                    monitor.rejectBeforeCommit(authorization?.id, cause);
                     throw cause;
                   }
                 },
@@ -1293,18 +1347,12 @@ export function createRunner(options = {}) {
             stateRoot: runStore.rootPath,
           },
         ),
-      async startAgentTurn(activeTurn, { pipelineState } = {}) {
+      async startAgentTurn(
+        activeTurn,
+        { pipelineState, preparePipelineState, catalogCheckpoint } = {},
+      ) {
         try {
           await monitor?.check();
-          const current = await runStore.loadRun(run.runId);
-          pipeline.workflow.validateRun(
-            deepFreeze({
-              ...current,
-              ...(pipelineState === undefined ? {} : { pipelineState }),
-              activeTurn,
-              revision: current.revision + 1,
-            }),
-          );
           const activity = {
             actor: activeTurn?.role,
             phase: activeTurn?.phase,
@@ -1313,13 +1361,24 @@ export function createRunner(options = {}) {
           };
           const next = await runStore.startAgentTurn(lease, activeTurn, {
             activity,
-            ...(pipelineState === undefined ? {} : { pipelineState }),
+            catalogCheckpoint,
+            pipelineState,
+            preparePipelineState,
+            validate: pipeline.workflow.validateRun,
           });
+          monitor?.recordWritableNoEffect(null);
           await publish(activity, next);
           return next;
         } catch (cause) {
-          if (activeTurn?.phase === "commit")
-            monitor?.rejectBeforeCommit(cause);
+          if (
+            activeTurn?.phase === "commit" &&
+            cause?.effectStarted === false
+          ) {
+            const current = await runStore.loadRun(run.runId);
+            const pending = current.pipelineState.pendingCommit;
+            if (pending?.status === "consumed")
+              monitor?.rejectBeforeCommit(pending.authorization.id, cause);
+          }
           throw cause;
         }
       },
@@ -1396,17 +1455,26 @@ export function createRunner(options = {}) {
         await publish(settlementActivity, next);
         return next;
       },
-      async transition(patch, { activity, expectedRevision } = {}) {
+      async transition(
+        patch,
+        { activity, expectedRevision, retainProviderRecovery } = {},
+      ) {
         // Reconcile safe content and correction accounting atomically with the
         // response reset, so owner loss cannot turn a retry into a second fix.
-        const reconciled = await reconcileProviderResponse({
-          patch,
-          expectedRevision,
-        });
+        const reconciled = retainProviderRecovery
+          ? undefined
+          : await reconcileProviderResponse({ patch, expectedRevision });
+        if (retainProviderRecovery) providerResponseRole = null;
         if (reconciled !== undefined && activity == null) return reconciled;
         const next = await runStore.transitionRun(lease, patch, {
           activity,
           expectedRevision: reconciled?.revision ?? expectedRevision,
+          writableCatalogRejection: catalogRetry.writableRejectionFor(
+            patch.pause,
+          ),
+          commitCatalogRejection: catalogRetry.commitRejectionFor(
+            patch.pipelineState?.pendingCommit,
+          ),
         });
         await publish(activity, next);
         return next;
@@ -1516,21 +1584,6 @@ export function createRunner(options = {}) {
       run.executionResource == null
     ) {
       return pauseForProjectConfiguration(run, lease);
-    }
-    if (
-      stopPending(run) &&
-      pipeline.prepareRecovery !== undefined &&
-      runStore.loadRunHistory
-    ) {
-      const history = await runStore.loadRunHistory(run.runId, {
-        stream: true,
-      });
-      if (!isDeepStrictEqual(history.run, run)) {
-        throw new RunnerError("Run changed before recovery inspection.", {
-          code: "ERR_RUN_REVISION_CHANGED",
-        });
-      }
-      await pipeline.prepareRecovery(run, history);
     }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -1772,6 +1825,7 @@ export function createRunner(options = {}) {
     }
     if (dispatch !== null)
       run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
+    let interruptedWritableNoEffect = false;
     if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
       const history = await runStore.loadRunHistory(run.runId, {
         stream: true,
@@ -1782,6 +1836,8 @@ export function createRunner(options = {}) {
         });
       }
       await pipeline.prepareRecovery(run, history);
+      interruptedWritableNoEffect =
+        history.hasWritableCatalogRejection === true;
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -1801,6 +1857,7 @@ export function createRunner(options = {}) {
         action,
         run,
         settings,
+        interruptedWritableNoEffect,
         runtime: runtimeFor(
           pipeline,
           lease,
@@ -1849,6 +1906,7 @@ export function createRunner(options = {}) {
         runtime: baseRuntime,
         publish,
         preEffectRejection: monitor.preEffectRejection,
+        writableNoEffectTurn: monitor.writableNoEffectTurn,
         configurationFailure,
       });
     }

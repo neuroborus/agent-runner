@@ -486,6 +486,14 @@ output pauses for explicit recovery. These limits prevent rejected provider
 output from becoming an unbounded hidden retry loop and do not consume the
 separate code-fix or semantic-evidence budgets.
 
+When either coding pipeline resumes candidate review or candidate clean
+confirmation after a model catalog miss, the retry stays bound to the validation
+infrastructure inspected before the miss. This applies to initial turns and
+corrections. Drift before dispatch or during the turn pauses the run and
+preserves any pending correction.
+If terminal confirmation resumes after a catalog miss, scope drift detected
+before dispatch invalidates finalization evidence and pauses the run.
+
 Finalization diagnostics identify the violated schema field and fixed constraint,
 using trusted list positions rather than rejected values or proposed identities.
 Plan execution groups independent violations into one bounded batch; invalid

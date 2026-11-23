@@ -103,6 +103,18 @@ unused authorization and preserves `COMMIT` for a newly authorized attempt on
 resume. Cancellation winning during reconciliation changes only the requested
 terminal outcome.
 
+A stop that races a model catalog miss settles under the same proof rules. A
+consumed COMMIT authorization retires for a fresh one-shot attempt only with
+the journaled [catalog rejection proof](commit.md#commit), a matching receipt
+and unchanged Git verification; a reduced stop record from before that proof
+was journaled keeps the authorization verification-only. An operator pause
+accepted after a read-only restatement's catalog rejection preserves the
+consumed restatement for explicit retry after rechecking the frozen inputs,
+repository, guidance and validation scope. Stop settlement retires the
+invocation without replaying it or renewing the allowance, and retains a
+watchdog continuation for explicit resume when its matching expiry predates
+stop acceptance.
+
 The runner service also accepts `timing: "after-current-commit"` when a step is
 selected, including its suspended checkpoints. It rejects this timing during
 clarification/bootstrap and when no current step exists. The target is resolved

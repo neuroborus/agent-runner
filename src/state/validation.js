@@ -17,6 +17,11 @@ import { normalizeCapabilityMismatchDiagnostic } from "../trusted-validation/ind
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
+import {
+  MODEL_CATALOG_RETRY_CODE,
+  normalizeCatalogResume,
+  normalizeModelCompletions,
+} from "./model-completion.js";
 import { normalizeObservationState } from "./observations.js";
 import {
   validStopBoundary,
@@ -24,7 +29,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 27;
+export const RUN_STATE_SCHEMA_VERSION = 28;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -66,6 +71,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   24,
   25,
   26,
+  27,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -90,6 +96,8 @@ const STATE_FIELDS = new Set([
   "clientAttributionFingerprint",
   "roles",
   "providerPolicies",
+  "modelCompletionReceipts",
+  "modelCatalogResume",
   "providerInactivityTimeoutMs",
   "providerInactivityFingerprint",
   "inactivityRecovery",
@@ -2088,6 +2096,37 @@ export function normalizeRunState(value, expectedRunId) {
     normalized.observations = normalizeObservationState({ ...value, roles });
   } catch {
     fail("Run provider recovery policy or observation evidence is invalid.");
+  }
+  try {
+    normalized.modelCompletionReceipts = normalizeModelCompletions(
+      value.modelCompletionReceipts,
+      roles,
+      value.schemaVersion,
+    );
+    normalized.modelCatalogResume = normalizeCatalogResume(
+      normalized,
+      value.modelCatalogResume,
+    );
+    for (const checkpoint of [pause, pause?.operatorResume?.pause]) {
+      if (checkpoint?.code !== MODEL_CATALOG_RETRY_CODE) continue;
+      if (
+        !["backend_unavailable", "provider_interrupted"].includes(
+          checkpoint.reason,
+        ) ||
+        normalized.activeTurn !== null ||
+        normalized.preparation !== null ||
+        normalized.executionProcess !== null ||
+        normalized.executionResource !== null ||
+        typeof checkpoint.role !== "string" ||
+        !Object.hasOwn(normalized.modelCompletionReceipts, checkpoint.role) ||
+        typeof checkpoint.resumeState !== "string" ||
+        typeof checkpoint.checkpoint !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(checkpoint.checkpoint)
+      )
+        fail("Model catalog pause has an invalid role or checkpoint.");
+    }
+  } catch {
+    fail("Run model catalog evidence is invalid.");
   }
   assertSerializedSize(normalized, "run");
   return normalized;

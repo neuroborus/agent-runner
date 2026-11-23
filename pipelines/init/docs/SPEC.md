@@ -580,3 +580,13 @@ after Runner publication. Pre-turn reconstruction exhaustion persists a resumabl
 `provider_interrupted` pause at the original checkpoint. Owner loss and explicit
 resume retain attempt 2 consumption, source-fork reservations and revision
 accounting; they never renew an automatic reconstruction allowance.
+
+A qualifying explicit-model catalog miss uses the same `provider_interrupted`
+pause. Admission and journal replay preserve the frozen role selection and
+settings, proposal evidence and spent revisions through the read-only turn
+start. Init can reconstruct the pending reservation from those saved facts
+without renewing the provider recovery allowances. Runner verifies
+the saved clarification hash before accepting the resume and before dispatching
+the read-only turn, including when recovery starts after resume acceptance.
+Temporary inspection unavailability preserves that retry binding through the
+inspection pause. Confirmed input drift blocks the retry.

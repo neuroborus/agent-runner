@@ -139,6 +139,35 @@ authorization on that verification-only path. If a commit is created but
 violates the authorization contract, pause with `commit_contract_violated`.
 Never amend, reset, or otherwise rewrite the unexpected commit automatically.
 
+For a qualifying catalog miss, journal separate `catalog` rejection proof of
+`none` and `commitExecutor: not_started` with the selected Worker's completion
+receipt present. Admission and replay bind that proof to the latest failed Worker
+attempt at the same `commit:<step>` checkpoint after the consumed COMMIT turn
+started. The recording event must repeat the normalized `commit`/`none`/
+`not_started` rejection that the Runner recorded on that attempt when it
+failed. A missing, completed, stale, mismatched or generically failed attempt
+grants no retry, even when a later event supplies a well-formed claim. Only
+after Git verifies no commit and unchanged candidate, index and controls does
+the consumed authorization retire into `backend_unavailable` for explicit
+retry. Live publication and journal replay require the retirement event to
+follow the consumed authorization and its durable rejection proof. Stop
+reconciliation applies the same rule, including when it resumes interrupted
+verification from `commit_failed`. A reduced stop record from before durable
+proof publication grants verification only.
+Other reduced pre-executor rejection evidence applies only to the consumed
+authorization whose invocation produced it.
+An exact authorized commit still settles once. Legacy
+`commit_failed` catalog pauses without a retained authorization offer no
+same-run retry through CLI, MCP or workflow dispatch.
+Resume retains the same selected step and binds turn admission to the
+replacement authorization's journaled preparation and consumption.
+An invalid or incomplete model catalog, including a malformed RPC response, or
+unsupported effort retains its bounded diagnosis through consumed authorization
+verification, including stop settlement. After unchanged Git verification,
+retire the authorization into `commit_failed` without a public retry action.
+Interrupted verification retains the consumed authorization for verification
+only.
+
 An authentication disposition follows the same proof boundary without using
 availability scheduling. The consumed record persists only
 `authentication: { disposition: "authentication_required", commitExecutor:

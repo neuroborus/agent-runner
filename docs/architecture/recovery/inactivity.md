@@ -24,12 +24,15 @@ suspend the deadline. Settlement drains timer persistence before returning.
 Before aborting an inactive provider, the run store durably journals the bounded
 `inactivity/expired` activity and `inactivityRecovery`: exactly `role`,
 `checkpoint`, `attempt` (1 or 2), `status` (`expired` or `reconstructing`),
-`reconstructionRevision` (null before attempt 2), `expiryRevision`, `configurationFingerprint`,
-and the observed `contentFingerprint`. The state store records expiry while ownership is still active without advancing
-the pipeline or changing other run fields. The marker
-is separate from availability episodes and contains no native payloads or tool
-content. Failure to persist evidence retires owned work without authorizing a
-retry. Process/resource retirement remains mandatory before reconciliation.
+`reconstructionRevision` (null before attempt 2), `expiryRevision`,
+`configurationFingerprint`, and the observed `contentFingerprint`. The state
+store records expiry while ownership is still active without advancing the
+pipeline or changing other run fields. In envelope version 28, admission
+and replay require the matching open provider attempt recorded after the
+active turn started. The marker is separate from availability episodes and
+contains no native payloads or tool content. Failure to persist evidence
+retires owned work without authorizing a retry. Process/resource retirement
+remains mandatory before reconciliation.
 
 Each pipeline reconciles its own read-only or writable checkpoint and any
 partial correction before reconstruction. Safe content invalidates stale gates;
@@ -42,9 +45,14 @@ resumable `backend_unavailable` rather than entering availability backoff. Owner
 loss does not replenish the allowance. Explicit resume after that pause permits
 one invocation with attempt 2 still consumed; separate classified availability
 failures retain their existing backoff, not another inactivity allowance.
+When a distinct provider failure takes precedence over a concurrent watchdog
+abort, Runner records the attempt as failed and retains the journaled expiry.
+An operator interruption still records an interrupted attempt.
 The reconstruction revision consumes that continuation durably: only an
-availability failure reconciled at or after the last reservation may authorize
-another launch. An older episode cannot authorize replay after owner loss.
+availability failure reconciled at or after the last reservation, or explicit
+resume of a proven catalog pause at the bound restatement checkpoint, may
+authorize another launch. Neither renews the consumed allowance. An older
+episode cannot authorize replay after owner loss.
 
 Only a returned provider response plus matching repository reconciliation clears
 the marker. Pipelines report failed reconciliation at turn settlement; safety
@@ -72,3 +80,28 @@ status, and `expiryProven`. Unproven activity and CLI state say reconstruction
 rather than inactivity. Bounded `expired`, `reconstructing`, and `recovered` activity uses
 the existing journal/projection transport. Client disconnect or canceled waits
 change observation only; they cannot cancel or reset the watchdog.
+
+## Catalog restatement continuations
+
+A proven [catalog pause](journal.md#explicit-model-catalog-recovery) at a bound
+read-only restatement checkpoint resumes explicitly through that checkpoint.
+The consumed reconstruction allowance and its marker remain consumed; the
+catalog pause grants no new allowance. If a catalog-resumed read-only turn
+requests native fresh fallback after retiring its provider process and
+resources, Runner can reserve the retained episode's unused reconstruction
+before launch. Admission and replay require the recorded catalog turn to follow
+the earlier expiry, the current provider observation to match the retained
+checkpoint, and the reconciled candidate to match the turn's baseline. The
+reservation and turn identity are preserved.
+A restarted coding restatement can continue from a journaled watchdog expiry
+only when it follows that invocation's recorded provider attempt and matches
+the repository and the attempted checkpoint. The attempted checkpoint can be
+the original reservation's retained provider episode. Operator-stop settlement
+preserves that continuation when the matching expiry predates stop acceptance.
+Only explicit resume dispatches it. Plan execution records eligibility for
+reconstruction separately from other continuations of the consumed attempt.
+For legacy runs without the marker, certified history must tie the latest
+restatement and its active provider attempt to the expiry and the same
+reconciled candidate. Plan execution records that recovered boundary when
+retiring the invocation. [Polishing availability backoff](availability.md#catalog-restatement-episodes)
+uses the same freshness rule.

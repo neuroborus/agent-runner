@@ -107,3 +107,21 @@ pre-executor proof and Git verification; the constrained executor and runner-own
 handoff are excluded. Ambiguous effects retain precedence. CLI/MCP publish the
 same bounded expiry/reconstruction/recovery activity and status; a client
 disconnect changes observation only.
+
+## Explicit-model catalog recovery
+
+The common [catalog recovery contract](../../../docs/ARCHITECTURE.md#explicit-model-catalog-recovery)
+applies after configuration, policy and stop checks. A qualifying miss,
+including one at candidate review, pauses as `backend_unavailable` with
+`ERR_MODEL_CATALOG_RETRY` at the bound role and checkpoint. Explicit resume
+retries the frozen selection without automatic backoff, adapter fallback or
+source refork. A `POLISH` or `CHECK_AND_FIX` catalog retry preserves the frozen
+input hashes, candidate, pending correction and fix-round accounting from the
+first pause through the matching turn start. Workspace drift during any proven
+no-effect lookup pauses as `unsafe_git_state` with the saved baseline and
+findings intact, on cold resume and during operator-stop settlement. Possible
+prior work instead reconciles into the read-only
+[finding-resolution result recovery](review.md#finding-resolution-result-recovery),
+which also owns restatement and gate retry bindings; validation-migration
+retries keep the [persisted](persistence.md#persistence-and-resume) phase,
+role and disagreement.

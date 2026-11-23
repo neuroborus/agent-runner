@@ -83,6 +83,10 @@ Read [Provider inactivity deadlines](architecture/recovery/inactivity.md#provide
 
 Read [Durable availability episodes](architecture/recovery/availability.md#durable-availability-episodes).
 
+### Explicit-model catalog recovery
+
+Read [Explicit-model catalog recovery](architecture/recovery/journal.md#explicit-model-catalog-recovery).
+
 ### Durable authentication-required pauses
 
 Read [Durable authentication-required pauses](architecture/recovery/authentication.md#durable-authentication-required-pauses).
@@ -94,6 +98,9 @@ Read [State-owned operator stop protocol](architecture/recovery/operator-stops.m
 ### Bounded ownership-failure diagnostics
 
 Read [Bounded ownership-failure diagnostics](architecture/recovery/ownership-diagnostics.md#bounded-ownership-failure-diagnostics).
+Its envelope 27 compatibility statement is historical; the
+[common envelope owner](architecture/migrations/common-envelope.md#catalog-recovery-evidence)
+records current compatibility metadata.
 
 ### Common envelope and pipeline migrations
 

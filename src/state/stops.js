@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { createOwnershipDiagnostic } from "../platform/index.js";
+import { nextCatalogResume } from "./model-completion.js";
 import { STOP_TIMINGS } from "./stop-contract.js";
 import { interruptObservations } from "./observations.js";
 import {
@@ -347,11 +348,11 @@ export function createStopService({
         "ERR_INVALID_STOP_RECONCILIATION",
       );
     }
+    const reconciled = { ...current, ...patch, activeTurn: null };
     const next = normalizeRunState(
       {
-        ...current,
-        ...patch,
-        activeTurn: null,
+        ...reconciled,
+        modelCatalogResume: nextCatalogResume(current, reconciled),
         observations: interruptObservations(current.observations),
         stopRequest: pending
           ? {

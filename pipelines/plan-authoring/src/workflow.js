@@ -291,7 +291,7 @@ export async function runPlanAuthoring({
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
-  // A published pause must survive an interrupted persistence response.
+  // A provider pause or resume may already be durable when publication throws.
   let dispositionPausePersistence = false;
   let clarificationAppendInProgress = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
@@ -330,10 +330,10 @@ export async function runPlanAuthoring({
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    dispositionPausePersistence = [
-      "authentication_required",
-      "output_exhausted",
-    ].includes(reason);
+    dispositionPausePersistence =
+      ["authentication_required", "output_exhausted"].includes(reason) ||
+      (details.code !== undefined &&
+        details.code === runtime.catalogRetry?.code);
     await transition(
       {
         ...pipelineState(),
@@ -592,6 +592,10 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
       unchangedCommitSelection ? inputContext : evidenceContext,
     );
     const availabilityCheckpoint = `${turn.phase}:read-only:${checkpoint}`;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      availabilityCheckpoint,
+    );
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
         role,
@@ -604,6 +608,7 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
         role,
         checkpoint: availabilityCheckpoint,
         repository: snapshot,
+        continueEpisode: catalogResume,
       });
     }
     const latestSession = [...currentRun.sessionLineage.children]
@@ -616,7 +621,7 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
       contextKey,
       sourceSession: currentRun.sessionLineage.source,
       sourceForkConsumed: pipelineState().lazySourceForkConsumed,
-      recovering,
+      recovering: recovering || catalogResume,
       freshSession,
     });
     const sourceForkRecovery = pipelineState().authenticationSourceForkRecovery;
@@ -682,17 +687,19 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
     let response;
     let agentError;
     let repositoryReconciled = false;
-    currentRun = await runtime.startAgentTurn(
-      turn,
-      consumeSourceFork
+    if (catalogResume) dispositionPausePersistence = true;
+    currentRun = await runtime.startAgentTurn(turn, {
+      ...(catalogResume ? { catalogCheckpoint: availabilityCheckpoint } : {}),
+      ...(consumeSourceFork
         ? {
             pipelineState: {
               ...pipelineState(),
               lazySourceForkConsumed: true,
             },
           }
-        : undefined,
-    );
+        : {}),
+    });
+    if (catalogResume) dispositionPausePersistence = false;
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
@@ -713,6 +720,13 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
       )
         return null;
       repositoryReconciled = true;
+      if (runtime.catalogRetry?.eligible(agentError)) {
+        await pause("backend_unavailable", {
+          ...runtime.catalogRetry.details(role, availabilityCheckpoint),
+          resumeState: pipelineState().workflowState,
+        });
+        return null;
+      }
       if (
         runtime.outputExhaustion?.eligible(agentError) ||
         (runtime.authentication?.eligible(agentError) &&
@@ -1473,6 +1487,9 @@ ${JSON.stringify(
           "lazy_output_invalid",
         ].includes(currentRun.pause.reason)
       ) {
+        dispositionPausePersistence =
+          currentRun.pause.code !== undefined &&
+          currentRun.pause.code === runtime.catalogRetry?.code;
         await transition(
           {
             ...pipelineState(),
@@ -1480,6 +1497,7 @@ ${JSON.stringify(
           },
           { pause: null },
         );
+        dispositionPausePersistence = false;
       } else {
         return currentRun;
       }
@@ -2195,6 +2213,7 @@ function isOwnershipFailure(cause) {
     [
       "ERR_EXECUTION_PROCESS_ACTIVE",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
       "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
     ].includes(cause?.code)
   );
